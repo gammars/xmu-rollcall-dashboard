@@ -6,7 +6,5 @@ legacy/v3.0.1/info.txt
 .xmu_rollcall/
 __pycache__/
 *.pyc
-/build/
-/dist/
 /*.spec
 *.egg-info/
