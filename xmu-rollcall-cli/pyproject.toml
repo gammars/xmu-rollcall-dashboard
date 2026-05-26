@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xmu-rollcall-dashboard"
+dynamic = ["version"]
+description = "Desktop dashboard for XMU TronClass rollcall monitoring"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "requests>=2.31.0",
+    "pycryptodome>=3.19.0",
+    "xmulogin>=1.0.0",
+]
+
+[project.scripts]
+xmu-dashboard = "xmu_rollcall.desktop:main"
+
+[tool.setuptools]
+packages = ["xmu_rollcall"]
+
+[tool.setuptools.dynamic]
+version = {attr = "xmu_rollcall.__version__"}

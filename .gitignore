@@ -1,0 +1,12 @@
+/venv/
+/.venv/
+/.idea/
+legacy/v3.0.1/info.txt
+.runtime/
+.xmu_rollcall/
+__pycache__/
+*.pyc
+/build/
+/dist/
+/*.spec
+*.egg-info/
