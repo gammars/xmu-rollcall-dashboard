@@ -31,6 +31,7 @@ from .config import (
     set_current_account,
     set_rollcall_settings,
 )
+from .jw_grades import GradeRecord, fetch_grade_records
 from .proxy_guard import disable_system_proxies
 from .utils import base_url, headers, load_session, retry_request, save_session, verify_session
 from .verify import find_number_code, send_code, send_radar
@@ -437,6 +438,9 @@ class DashboardApp:
         self.monitor_stop_event: threading.Event | None = None
         self.events_by_item: dict[str, RollcallEvent] = {}
         self.course_records: list[CourseRollcallRecord] = []
+        self.grade_records: list[GradeRecord] = []
+        self.course_refresh_in_progress = False
+        self.grade_refresh_in_progress = False
         self.started_at: float | None = None
         self.auto_answer_var = tk.BooleanVar(value=False)
         self.poll_interval_var = tk.IntVar(value=DEFAULT_POLL_INTERVAL_SECONDS)
@@ -444,6 +448,8 @@ class DashboardApp:
         self.semester_var = tk.StringVar(value="全部")
         self.only_unsigned_var = tk.BooleanVar(value=False)
         self.course_summary_var = tk.StringVar(value="登录后点击刷新，查看课程签到数据。")
+        self.grade_term_var = tk.StringVar(value="全部")
+        self.grade_summary_var = tk.StringVar(value="登录后点击刷新，查询本人教务成绩。")
 
         self.status_var = tk.StringVar(value="未登录")
         self.account_var = tk.StringVar(value="未登录")
@@ -481,18 +487,21 @@ class DashboardApp:
         dashboard_tab = ttk.Frame(notebook, padding=12)
         events_tab = ttk.Frame(notebook, padding=12)
         course_tab = ttk.Frame(notebook, padding=12)
+        grades_tab = ttk.Frame(notebook, padding=12)
         settings_tab = ttk.Frame(notebook, padding=12)
         logs_tab = ttk.Frame(notebook, padding=12)
 
         notebook.add(dashboard_tab, text="总览")
         notebook.add(events_tab, text="签到事件")
         notebook.add(course_tab, text="课程签到总览")
+        notebook.add(grades_tab, text="成绩查询")
         notebook.add(settings_tab, text="策略")
         notebook.add(logs_tab, text="日志")
 
         self._build_dashboard_tab(dashboard_tab)
         self._build_events_tab(events_tab)
         self._build_course_tab(course_tab)
+        self._build_grades_tab(grades_tab)
         self._build_settings_tab(settings_tab)
         self._build_logs_tab(logs_tab)
 
@@ -607,6 +616,65 @@ class DashboardApp:
         scrollbar = ttk.Scrollbar(table_frame, command=self.course_tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.course_tree.configure(yscrollcommand=scrollbar.set)
+
+    def _build_grades_tab(self, parent):
+        parent.rowconfigure(1, weight=1)
+        parent.columnconfigure(0, weight=1)
+
+        toolbar = ttk.Frame(parent)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Button(toolbar, text="刷新成绩", command=self.refresh_grades).pack(side="left")
+        ttk.Label(toolbar, text="学期").pack(side="left", padx=(16, 0))
+        self.grade_term_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self.grade_term_var,
+            values=("全部",),
+            state="readonly",
+            width=24,
+        )
+        self.grade_term_combo.pack(side="left", padx=8)
+        self.grade_term_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_grade_tree())
+        ttk.Label(toolbar, textvariable=self.grade_summary_var).pack(side="left", padx=14)
+
+        table_frame = ttk.Frame(parent)
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+
+        columns = (
+            "term", "course", "code", "credit", "score", "point",
+            "nature", "assessment", "composition",
+        )
+        self.grade_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=16)
+        headings = {
+            "term": "学期",
+            "course": "课程名称",
+            "code": "课程号",
+            "credit": "学分",
+            "score": "成绩",
+            "point": "绩点",
+            "nature": "课程性质",
+            "assessment": "考核方式",
+            "composition": "成绩构成",
+        }
+        for column, heading in headings.items():
+            self.grade_tree.heading(column, text=heading)
+        self.grade_tree.column("term", width=180)
+        self.grade_tree.column("course", width=220)
+        self.grade_tree.column("code", width=130, anchor="center")
+        self.grade_tree.column("credit", width=60, anchor="center")
+        self.grade_tree.column("score", width=70, anchor="center")
+        self.grade_tree.column("point", width=60, anchor="center")
+        self.grade_tree.column("nature", width=90, anchor="center")
+        self.grade_tree.column("assessment", width=80, anchor="center")
+        self.grade_tree.column("composition", width=250)
+        self.grade_tree.grid(row=0, column=0, sticky="nsew")
+
+        vertical = ttk.Scrollbar(table_frame, orient="vertical", command=self.grade_tree.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(table_frame, orient="horizontal", command=self.grade_tree.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.grade_tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
 
     def _build_settings_tab(self, parent):
         parent.columnconfigure(0, weight=1)
@@ -761,6 +829,13 @@ class DashboardApp:
         self.account_var.set("未登录")
         self.monitor_status_var.set("未启动")
         self.last_result_var.set("-")
+        self.course_refresh_in_progress = False
+        self.grade_refresh_in_progress = False
+        self.grade_records = []
+        self.grade_term_var.set("全部")
+        self.grade_term_combo.configure(values=("全部",))
+        self._refresh_grade_tree()
+        self.grade_summary_var.set("登录后点击刷新，查询本人教务成绩。")
 
         if account:
             try:
@@ -809,15 +884,19 @@ class DashboardApp:
             return
         self._update_event_result(item_id, "已跳过", "用户手动跳过")
 
-    def refresh_course_rollcalls(self):
+    def refresh_course_rollcalls(self, silent=False):
         if not self.session or not self.account:
-            messagebox.showwarning("尚未登录", "请先登录。")
+            if not silent:
+                messagebox.showwarning("尚未登录", "请先登录。")
             return
+        if self.course_refresh_in_progress:
+            return
+        self.course_refresh_in_progress = True
         self.course_summary_var.set("正在刷新课程签到数据...")
         self.log("开始刷新课程签到总览。")
-        threading.Thread(target=self._course_rollcalls_worker, daemon=True).start()
+        threading.Thread(target=self._course_rollcalls_worker, args=(silent,), daemon=True).start()
 
-    def _course_rollcalls_worker(self):
+    def _course_rollcalls_worker(self, silent=False):
         try:
             username = str(self.account.get("username", "")) if self.account else ""
             records, source = fetch_course_rollcall_records(
@@ -828,7 +907,41 @@ class DashboardApp:
             )
             self.queue.put(("course_rollcalls", records, source))
         except Exception as exc:
-            self.queue.put(("course_rollcalls_error", str(exc)))
+            self.queue.put(("course_rollcalls_error", str(exc), silent))
+
+    def refresh_grades(self, silent=False):
+        if not self.account:
+            if not silent:
+                messagebox.showwarning("尚未登录", "请先在总览页登录。")
+            return
+        if not self.account.get("password"):
+            if silent:
+                self.grade_summary_var.set("需要重新登录后才能自动查询成绩")
+                self.log("自动查询成绩跳过：当前账号没有已保存密码。")
+            else:
+                messagebox.showwarning("缺少密码", "请在总览页重新输入密码并登录。")
+            return
+        if self.grade_refresh_in_progress:
+            return
+        self.grade_refresh_in_progress = True
+        self.grade_summary_var.set("正在登录教务系统并查询成绩...")
+        self.log("开始查询本人教务成绩。")
+        threading.Thread(target=self._grades_worker, args=(silent,), daemon=True).start()
+
+    def _grades_worker(self, silent=False):
+        try:
+            records = fetch_grade_records(
+                str(self.account.get("username", "")),
+                str(self.account.get("password", "")),
+            )
+            self.queue.put(("grades", records))
+        except Exception as exc:
+            self.queue.put(("grades_error", str(exc), silent))
+
+    def _refresh_after_login(self):
+        self.log("登录完成，开始后台刷新课程签到总览和成绩。")
+        self.refresh_course_rollcalls(silent=True)
+        self.refresh_grades(silent=True)
 
     def _selected_item_id(self):
         selection = self.events_tree.selection() or self.recent_tree.selection()
@@ -876,6 +989,7 @@ class DashboardApp:
             self.status_var.set("已登录")
             self.account_var.set(account.get("name") or account.get("username") or "已登录")
             self.log(f"登录成功：{self.account_var.get()}")
+            self._refresh_after_login()
         elif kind == "login_failed":
             self.status_var.set("未登录")
             self.account_var.set("未登录")
@@ -910,11 +1024,25 @@ class DashboardApp:
             self._update_event_code(item_id, code, detail)
         elif kind == "course_rollcalls":
             _, records, source = event
+            self.course_refresh_in_progress = False
             self._set_course_records(records, source)
         elif kind == "course_rollcalls_error":
+            self.course_refresh_in_progress = False
             self.course_summary_var.set("刷新失败")
             self.log(f"课程签到总览刷新失败：{event[1]}")
-            messagebox.showerror("刷新失败", event[1])
+            silent = event[2] if len(event) > 2 else False
+            if not silent:
+                messagebox.showerror("刷新失败", event[1])
+        elif kind == "grades":
+            self.grade_refresh_in_progress = False
+            self._set_grade_records(event[1])
+        elif kind == "grades_error":
+            self.grade_refresh_in_progress = False
+            self.grade_summary_var.set("查询失败")
+            self.log(f"成绩查询失败：{event[1]}")
+            silent = event[2] if len(event) > 2 else False
+            if not silent:
+                messagebox.showerror("成绩查询失败", event[1])
         elif kind == "error":
             self.log(event[1])
 
@@ -989,6 +1117,50 @@ class DashboardApp:
         self.course_records = records
         self._refresh_course_tree()
         self.log(f"课程签到总览刷新完成。{source}")
+
+    def _set_grade_records(self, records: list[GradeRecord]):
+        self.grade_records = records
+        term_names = []
+        for record in records:
+            if record.term_name not in term_names:
+                term_names.append(record.term_name)
+        self.grade_term_combo.configure(values=("全部", *term_names))
+        if records:
+            latest_record = max(records, key=lambda record: record.term_code)
+            self.grade_term_var.set(latest_record.term_name)
+        else:
+            self.grade_term_var.set("全部")
+        self._refresh_grade_tree()
+        self.log(f"成绩查询完成，共 {len(records)} 条。")
+
+    def _refresh_grade_tree(self):
+        selected_term = self.grade_term_var.get()
+        records = [
+            record for record in self.grade_records
+            if selected_term == "全部" or record.term_name == selected_term
+        ]
+        for item in self.grade_tree.get_children():
+            self.grade_tree.delete(item)
+        for record in records:
+            self.grade_tree.insert(
+                "",
+                "end",
+                values=(
+                    record.term_name,
+                    record.course_name,
+                    record.course_code,
+                    record.credit,
+                    record.score,
+                    record.grade_point,
+                    record.course_nature,
+                    record.assessment,
+                    record.composition,
+                ),
+            )
+        if self.grade_records:
+            self.grade_summary_var.set(f"共 {len(self.grade_records)} 条；当前显示 {len(records)} 条")
+        else:
+            self.grade_summary_var.set("暂无已公布成绩")
 
     def _refresh_course_tree(self):
         records = self.course_records
