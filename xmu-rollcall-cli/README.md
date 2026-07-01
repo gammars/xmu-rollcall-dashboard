@@ -1,6 +1,8 @@
 # XMU Rollcall Dashboard Package
 
-This directory contains the Python package used by the desktop dashboard.
+This directory contains the Python package used by the desktop dashboard,
+including rollcall monitoring, personal grade lookup, and authorized LNT
+courseware downloads.
 Install runtime dependencies from the repository root with:
 
 ```powershell

@@ -12,9 +12,11 @@ import threading
 import time
 import tkinter as tk
 import os
+import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 import requests
 from xmulogin import xmulogin
@@ -30,6 +32,15 @@ from .config import (
     save_config,
     set_current_account,
     set_rollcall_settings,
+)
+from .courseware import (
+    CourseSummary,
+    CoursewareItem,
+    download_courseware,
+    fetch_courses,
+    fetch_courseware,
+    format_size,
+    sanitize_filename,
 )
 from .jw_grades import GradeRecord, fetch_grade_records
 from .proxy_guard import disable_system_proxies
@@ -428,8 +439,8 @@ class DashboardApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"XMU Rollcall Dashboard v{__version__}")
-        self.root.geometry("980x680")
-        self.root.minsize(900, 620)
+        self.root.geometry("1180x720")
+        self.root.minsize(980, 640)
 
         self.queue: queue.Queue = queue.Queue()
         self.session = None
@@ -439,8 +450,15 @@ class DashboardApp:
         self.events_by_item: dict[str, RollcallEvent] = {}
         self.course_records: list[CourseRollcallRecord] = []
         self.grade_records: list[GradeRecord] = []
+        self.courseware_courses: list[CourseSummary] = []
+        self.courseware_items: list[CoursewareItem] = []
+        self.courseware_course_by_display: dict[str, CourseSummary] = {}
+        self.courseware_items_by_tree_id: dict[str, CoursewareItem] = {}
         self.course_refresh_in_progress = False
         self.grade_refresh_in_progress = False
+        self.courseware_courses_refresh_in_progress = False
+        self.courseware_refresh_in_progress = False
+        self.courseware_download_in_progress = False
         self.started_at: float | None = None
         self.auto_answer_var = tk.BooleanVar(value=False)
         self.poll_interval_var = tk.IntVar(value=DEFAULT_POLL_INTERVAL_SECONDS)
@@ -450,6 +468,11 @@ class DashboardApp:
         self.course_summary_var = tk.StringVar(value="登录后点击刷新，查看课程签到数据。")
         self.grade_term_var = tk.StringVar(value="全部")
         self.grade_summary_var = tk.StringVar(value="登录后点击刷新，查询本人教务成绩。")
+        self.courseware_course_var = tk.StringVar()
+        self.courseware_summary_var = tk.StringVar(value="登录后自动读取课程和课件。")
+        self.courseware_download_dir_var = tk.StringVar(
+            value=str(Path.home() / "Downloads" / "XMU-Courseware")
+        )
 
         self.status_var = tk.StringVar(value="未登录")
         self.account_var = tk.StringVar(value="未登录")
@@ -488,6 +511,7 @@ class DashboardApp:
         events_tab = ttk.Frame(notebook, padding=12)
         course_tab = ttk.Frame(notebook, padding=12)
         grades_tab = ttk.Frame(notebook, padding=12)
+        courseware_tab = ttk.Frame(notebook, padding=12)
         settings_tab = ttk.Frame(notebook, padding=12)
         logs_tab = ttk.Frame(notebook, padding=12)
 
@@ -495,6 +519,7 @@ class DashboardApp:
         notebook.add(events_tab, text="签到事件")
         notebook.add(course_tab, text="课程签到总览")
         notebook.add(grades_tab, text="成绩查询")
+        notebook.add(courseware_tab, text="课程课件")
         notebook.add(settings_tab, text="策略")
         notebook.add(logs_tab, text="日志")
 
@@ -502,6 +527,7 @@ class DashboardApp:
         self._build_events_tab(events_tab)
         self._build_course_tab(course_tab)
         self._build_grades_tab(grades_tab)
+        self._build_courseware_tab(courseware_tab)
         self._build_settings_tab(settings_tab)
         self._build_logs_tab(logs_tab)
 
@@ -676,6 +702,79 @@ class DashboardApp:
         horizontal.grid(row=1, column=0, sticky="ew")
         self.grade_tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
 
+    def _build_courseware_tab(self, parent):
+        parent.rowconfigure(1, weight=1)
+        parent.columnconfigure(0, weight=1)
+
+        toolbar = ttk.Frame(parent)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(toolbar, text="课程").pack(side="left")
+        self.courseware_course_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self.courseware_course_var,
+            values=(),
+            state="readonly",
+            width=46,
+        )
+        self.courseware_course_combo.pack(side="left", padx=8)
+        self.courseware_course_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.refresh_selected_courseware(),
+        )
+        ttk.Button(toolbar, text="刷新课程", command=self.refresh_courseware_courses).pack(side="left")
+        ttk.Button(toolbar, text="刷新课件", command=self.refresh_selected_courseware).pack(side="left", padx=8)
+        ttk.Label(toolbar, textvariable=self.courseware_summary_var).pack(side="left", padx=10)
+
+        table_frame = ttk.Frame(parent)
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+        columns = (
+            "module", "syllabus", "activity", "filename", "type",
+            "size", "published", "download", "status",
+        )
+        self.courseware_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=16)
+        headings = {
+            "module": "章节",
+            "syllabus": "小节",
+            "activity": "课件活动",
+            "filename": "文件名",
+            "type": "类型",
+            "size": "大小",
+            "published": "发布时间",
+            "download": "下载权限",
+            "status": "文件状态",
+        }
+        for column, heading in headings.items():
+            self.courseware_tree.heading(column, text=heading)
+        self.courseware_tree.column("module", width=100)
+        self.courseware_tree.column("syllabus", width=120)
+        self.courseware_tree.column("activity", width=230)
+        self.courseware_tree.column("filename", width=260)
+        self.courseware_tree.column("type", width=80, anchor="center")
+        self.courseware_tree.column("size", width=80, anchor="e")
+        self.courseware_tree.column("published", width=145, anchor="center")
+        self.courseware_tree.column("download", width=120, anchor="center")
+        self.courseware_tree.column("status", width=90, anchor="center")
+        self.courseware_tree.grid(row=0, column=0, sticky="nsew")
+        self.courseware_tree.bind("<Double-1>", lambda _event: self.activate_selected_courseware())
+
+        vertical = ttk.Scrollbar(table_frame, orient="vertical", command=self.courseware_tree.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(table_frame, orient="horizontal", command=self.courseware_tree.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.courseware_tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        self.courseware_tree.tag_configure("downloadable", foreground="#176b32")
+        self.courseware_tree.tag_configure("blocked", foreground="#777777")
+
+        actions = ttk.Frame(parent)
+        actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        ttk.Button(actions, text="下载选中", command=self.download_selected_courseware).pack(side="left")
+        ttk.Button(actions, text="下载全部可下载课件", command=self.download_all_courseware).pack(side="left", padx=8)
+        ttk.Button(actions, text="打开平台页面", command=self.open_selected_courseware).pack(side="left")
+        ttk.Button(actions, text="选择目录", command=self.choose_courseware_download_dir).pack(side="left", padx=8)
+        ttk.Label(actions, textvariable=self.courseware_download_dir_var).pack(side="left", padx=10)
+
     def _build_settings_tab(self, parent):
         parent.columnconfigure(0, weight=1)
 
@@ -831,11 +930,21 @@ class DashboardApp:
         self.last_result_var.set("-")
         self.course_refresh_in_progress = False
         self.grade_refresh_in_progress = False
+        self.courseware_courses_refresh_in_progress = False
+        self.courseware_refresh_in_progress = False
+        self.courseware_download_in_progress = False
         self.grade_records = []
         self.grade_term_var.set("全部")
         self.grade_term_combo.configure(values=("全部",))
         self._refresh_grade_tree()
         self.grade_summary_var.set("登录后点击刷新，查询本人教务成绩。")
+        self.courseware_courses = []
+        self.courseware_items = []
+        self.courseware_course_by_display = {}
+        self.courseware_course_combo.configure(values=())
+        self.courseware_course_var.set("")
+        self._refresh_courseware_tree()
+        self.courseware_summary_var.set("登录后自动读取课程和课件。")
 
         if account:
             try:
@@ -909,6 +1018,139 @@ class DashboardApp:
         except Exception as exc:
             self.queue.put(("course_rollcalls_error", str(exc), silent))
 
+    def refresh_courseware_courses(self, silent=False):
+        if not self.session:
+            if not silent:
+                messagebox.showwarning("尚未登录", "请先在总览页登录。")
+            return
+        if self.courseware_courses_refresh_in_progress:
+            return
+        self.courseware_courses_refresh_in_progress = True
+        self.courseware_summary_var.set("正在读取课程列表...")
+        self.log("开始读取课件课程列表。")
+        threading.Thread(target=self._courseware_courses_worker, args=(silent,), daemon=True).start()
+
+    def _courseware_courses_worker(self, silent=False):
+        try:
+            courses, source = fetch_courses(self.session)
+            self.queue.put(("courseware_courses", courses, source))
+        except Exception as exc:
+            self.queue.put(("courseware_courses_error", str(exc), silent))
+
+    def _selected_courseware_course(self) -> CourseSummary | None:
+        return self.courseware_course_by_display.get(self.courseware_course_var.get())
+
+    def refresh_selected_courseware(self, silent=False):
+        if not self.session:
+            if not silent:
+                messagebox.showwarning("尚未登录", "请先在总览页登录。")
+            return
+        course = self._selected_courseware_course()
+        if not course:
+            if not silent:
+                messagebox.showinfo("未选择课程", "请先选择一门课程。")
+            return
+        if self.courseware_refresh_in_progress:
+            return
+        self.courseware_refresh_in_progress = True
+        self.courseware_summary_var.set(f"正在读取《{course.title}》课件...")
+        self.log(f"开始读取课程课件：{course.title}。")
+        threading.Thread(
+            target=self._courseware_worker,
+            args=(course, silent),
+            daemon=True,
+        ).start()
+
+    def _courseware_worker(self, course: CourseSummary, silent=False):
+        try:
+            items = fetch_courseware(self.session, course.course_id)
+            self.queue.put(("courseware", course, items))
+        except Exception as exc:
+            self.queue.put(("courseware_error", str(exc), silent))
+
+    def choose_courseware_download_dir(self):
+        selected = filedialog.askdirectory(
+            title="选择课件下载目录",
+            initialdir=self.courseware_download_dir_var.get() or str(Path.home()),
+        )
+        if selected:
+            self.courseware_download_dir_var.set(selected)
+
+    def download_selected_courseware(self):
+        selection = self.courseware_tree.selection()
+        if not selection:
+            messagebox.showinfo("未选择", "请先选择一个课件附件。")
+            return
+        item = self.courseware_items_by_tree_id.get(selection[0])
+        if not item:
+            return
+        if item.download_status != "可下载":
+            messagebox.showwarning("无法下载", item.download_status)
+            return
+        self._start_courseware_download([item])
+
+    def activate_selected_courseware(self):
+        selection = self.courseware_tree.selection()
+        if not selection:
+            return
+        item = self.courseware_items_by_tree_id.get(selection[0])
+        if item and item.download_status == "可下载":
+            self._start_courseware_download([item])
+        elif item:
+            self.open_selected_courseware()
+
+    def open_selected_courseware(self):
+        selection = self.courseware_tree.selection()
+        if not selection:
+            messagebox.showinfo("未选择", "请先选择一个课件活动。")
+            return
+        item = self.courseware_items_by_tree_id.get(selection[0])
+        if not item:
+            return
+        url = f"{base_url}/course/{item.course_id}/learning-activity#/{item.activity_id}"
+        if not webbrowser.open(url):
+            messagebox.showerror("打开失败", "无法调用系统浏览器打开平台页面。")
+
+    def download_all_courseware(self):
+        items = [item for item in self.courseware_items if item.download_status == "可下载"]
+        if not items:
+            messagebox.showinfo("没有可下载课件", "当前课程没有平台授权下载的附件。")
+            return
+        total_size = sum(item.size for item in items)
+        if not messagebox.askyesno(
+            "确认批量下载",
+            f"将下载 {len(items)} 个文件，共 {format_size(total_size)}。是否继续？",
+        ):
+            return
+        self._start_courseware_download(items)
+
+    def _start_courseware_download(self, items: list[CoursewareItem]):
+        if self.courseware_download_in_progress:
+            messagebox.showinfo("正在下载", "请等待当前下载任务完成。")
+            return
+        course = self._selected_courseware_course()
+        if not course:
+            return
+        self.courseware_download_in_progress = True
+        destination = Path(self.courseware_download_dir_var.get()) / sanitize_filename(course.title)
+        self.courseware_summary_var.set(f"准备下载 {len(items)} 个文件...")
+        threading.Thread(
+            target=self._courseware_download_worker,
+            args=(items, destination),
+            daemon=True,
+        ).start()
+
+    def _courseware_download_worker(self, items: list[CoursewareItem], destination: Path):
+        downloaded = []
+        errors = []
+        for index, item in enumerate(items, start=1):
+            self.queue.put(("courseware_download_progress", index, len(items), item.filename))
+            try:
+                downloaded.append(download_courseware(self.session, item, destination))
+            except Exception as exc:
+                errors.append(f"{item.filename or item.activity_title}：{exc}")
+        self.queue.put(("courseware_download_done", downloaded, errors, destination))
+
     def refresh_grades(self, silent=False):
         if not self.account:
             if not silent:
@@ -939,9 +1181,10 @@ class DashboardApp:
             self.queue.put(("grades_error", str(exc), silent))
 
     def _refresh_after_login(self):
-        self.log("登录完成，开始后台刷新课程签到总览和成绩。")
+        self.log("登录完成，开始后台刷新课程签到总览、成绩和课件课程。")
         self.refresh_course_rollcalls(silent=True)
         self.refresh_grades(silent=True)
+        self.refresh_courseware_courses(silent=True)
 
     def _selected_item_id(self):
         selection = self.events_tree.selection() or self.recent_tree.selection()
@@ -1043,6 +1286,42 @@ class DashboardApp:
             silent = event[2] if len(event) > 2 else False
             if not silent:
                 messagebox.showerror("成绩查询失败", event[1])
+        elif kind == "courseware_courses":
+            self.courseware_courses_refresh_in_progress = False
+            self._set_courseware_courses(event[1], event[2])
+        elif kind == "courseware_courses_error":
+            self.courseware_courses_refresh_in_progress = False
+            self.courseware_summary_var.set("课程列表读取失败")
+            self.log(f"课件课程列表读取失败：{event[1]}")
+            silent = event[2] if len(event) > 2 else False
+            if not silent:
+                messagebox.showerror("课程列表读取失败", event[1])
+        elif kind == "courseware":
+            self.courseware_refresh_in_progress = False
+            self._set_courseware_items(event[1], event[2])
+        elif kind == "courseware_error":
+            self.courseware_refresh_in_progress = False
+            self.courseware_summary_var.set("课件读取失败")
+            self.log(f"课程课件读取失败：{event[1]}")
+            silent = event[2] if len(event) > 2 else False
+            if not silent:
+                messagebox.showerror("课件读取失败", event[1])
+        elif kind == "courseware_download_progress":
+            _, index, total, filename = event
+            self.courseware_summary_var.set(f"正在下载 {index}/{total}：{filename}")
+        elif kind == "courseware_download_done":
+            self.courseware_download_in_progress = False
+            _, downloaded, errors, destination = event
+            self.courseware_summary_var.set(f"下载完成 {len(downloaded)} 个；失败 {len(errors)} 个")
+            self.log(f"课件下载完成：{len(downloaded)} 个，目录：{destination}")
+            if errors:
+                self.log("课件下载失败：" + "；".join(errors))
+                messagebox.showwarning(
+                    "部分下载失败",
+                    f"成功 {len(downloaded)} 个，失败 {len(errors)} 个。\n" + "\n".join(errors[:8]),
+                )
+            else:
+                messagebox.showinfo("下载完成", f"已下载 {len(downloaded)} 个文件到：\n{destination}")
         elif kind == "error":
             self.log(event[1])
 
@@ -1117,6 +1396,80 @@ class DashboardApp:
         self.course_records = records
         self._refresh_course_tree()
         self.log(f"课程签到总览刷新完成。{source}")
+
+    def _set_courseware_courses(self, courses: list[CourseSummary], source: str):
+        previous = self.courseware_course_var.get()
+        self.courseware_courses = courses
+        self.courseware_course_by_display = {}
+        displays = []
+        for course in courses:
+            display = course.display_name
+            if display in self.courseware_course_by_display:
+                display = f"{display}  ({course.course_id})"
+            self.courseware_course_by_display[display] = course
+            displays.append(display)
+        self.courseware_course_combo.configure(values=displays)
+        if previous in self.courseware_course_by_display:
+            self.courseware_course_var.set(previous)
+        elif displays:
+            self.courseware_course_var.set(displays[0])
+        else:
+            self.courseware_course_var.set("")
+        self.courseware_summary_var.set(f"共 {len(courses)} 门课程")
+        self.log(f"课件课程列表读取完成，共 {len(courses)} 门；接口：{source}")
+        if displays:
+            self.refresh_selected_courseware(silent=True)
+
+    def _set_courseware_items(self, course: CourseSummary, items: list[CoursewareItem]):
+        selected = self._selected_courseware_course()
+        if selected and selected.course_id != course.course_id:
+            self.refresh_selected_courseware(silent=True)
+            return
+        self.courseware_items = items
+        self._refresh_courseware_tree()
+        downloadable = sum(item.download_status == "可下载" for item in items)
+        blocked = sum(item.download_status == "仅可预览（未开放下载）" for item in items)
+        self.courseware_summary_var.set(
+            f"课件 {len(items)} 条；可下载 {downloadable}；仅可预览 {blocked}"
+        )
+        self.log(
+            f"课程课件读取完成：{course.title}，共 {len(items)} 条，可下载 {downloadable} 条。"
+        )
+
+    def _refresh_courseware_tree(self):
+        for tree_id in self.courseware_tree.get_children():
+            self.courseware_tree.delete(tree_id)
+        self.courseware_items_by_tree_id = {}
+        type_names = {
+            "material": "资料",
+            "online_video": "视频",
+            "slide": "课件",
+            "web_link": "链接",
+            "page": "页面",
+            "scorm": "SCORM",
+            "h5_courseware": "H5课件",
+        }
+        for index, item in enumerate(self.courseware_items):
+            tree_id = f"courseware-{index}"
+            permission_tag = "downloadable" if item.download_status == "可下载" else "blocked"
+            self.courseware_tree.insert(
+                "",
+                "end",
+                iid=tree_id,
+                tags=(permission_tag,),
+                values=(
+                    item.module_name,
+                    item.syllabus_name or "-",
+                    item.activity_title,
+                    item.filename or "-",
+                    type_names.get(item.activity_type, item.media_type or item.activity_type or "-"),
+                    format_size(item.size) if item.size else "-",
+                    normalize_time(item.published_at),
+                    item.download_status,
+                    item.upload_status or "-",
+                ),
+            )
+            self.courseware_items_by_tree_id[tree_id] = item
 
     def _set_grade_records(self, records: list[GradeRecord]):
         self.grade_records = records

@@ -2,7 +2,7 @@
 setlocal
 
 set ENV_NAME=xmu-rollcall-dashboard
-set APP_NAME=XMU-Rollcall-Dashboard-Grades-Auto
+set APP_NAME=XMU-Rollcall-Dashboard-Courseware
 
 cd /d "%~dp0\.."
 
