@@ -13,6 +13,7 @@ from xmu_rollcall.courseware import (  # noqa: E402
     CoursewareItem,
     available_path,
     download_courseware,
+    fetch_courses,
     fetch_courseware,
     format_size,
     sanitize_filename,
@@ -82,7 +83,7 @@ class FakeSession:
 class CoursewareTests(unittest.TestCase):
     def test_download_status_respects_platform_permission(self):
         self.assertEqual(make_item().download_status, "可下载")
-        self.assertEqual(make_item(allow_download=False).download_status, "仅可预览（未开放下载）")
+        self.assertEqual(make_item(allow_download=False).download_status, "可下载（平台版权保护）")
         self.assertEqual(make_item(upload_id="").download_status, "无附件")
 
     def test_sanitize_filename_for_windows(self):
@@ -104,15 +105,48 @@ class CoursewareTests(unittest.TestCase):
             self.assertTrue(session.urls[0].endswith("/api/uploads/reference/4/url"))
             self.assertEqual(session.urls[1], "https://storage.example.test/signed-file")
 
-    def test_download_rejects_unauthorized_item_before_request(self):
+    def test_download_allows_copyright_protected_item(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session = FakeSession()
-            with self.assertRaises(PermissionError):
-                download_courseware(session, make_item(allow_download=False), temp_dir)
-            self.assertEqual(session.urls, [])
+            target = download_courseware(session, make_item(allow_download=False), temp_dir)
+            self.assertEqual(target.read_bytes(), b"part-onepart-two")
+            self.assertTrue(session.urls[0].endswith("/api/uploads/reference/4/url"))
 
     def test_format_size(self):
         self.assertEqual(format_size(2048), "2.0 KB")
+
+    def test_fetch_courses_keeps_platform_order_and_filter_metadata(self):
+        class JsonResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"courses": [
+                    {
+                        "id": "c2",
+                        "name": "Second Course",
+                        "academic_year": {"name": "2025-2026"},
+                        "semester": {"code": "2025-2026-2"},
+                    },
+                    {
+                        "id": "c1",
+                        "name": "First Course",
+                        "academic_year": {"name": "2025-2026"},
+                        "semester": {"code": "2025-2026-1"},
+                    },
+                ]}
+
+        class CourseListSession:
+            def get(self, url, **kwargs):
+                return JsonResponse()
+
+        courses, _source = fetch_courses(CourseListSession())
+        self.assertEqual([course.course_id for course in courses], ["c2", "c1"])
+        self.assertEqual(courses[0].term, "2025-2026")
+        self.assertEqual(courses[0].semester_code, "2025-2026-2")
+        self.assertIn("2025-2026", courses[0].search_text)
 
     def test_homework_is_filtered_before_detail_request(self):
         class JsonResponse:
@@ -153,6 +187,76 @@ class CoursewareTests(unittest.TestCase):
         items = fetch_courseware(session, "1")
         self.assertEqual([item.activity_id for item in items], ["11"])
         self.assertFalse(any(url.endswith("/activities/10") for url in session.urls))
+
+    def test_courseware_details_follow_module_order(self):
+        class JsonResponse:
+            status_code = 200
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class MultiActivitySession:
+            def __init__(self):
+                self.urls = []
+
+            def get(self, url, **kwargs):
+                self.urls.append(url)
+                if url.endswith("/courseware-activities"):
+                    return JsonResponse([
+                        {"id": 22, "type": "material", "title": "B", "module_id": "m2", "syllabus_id": 0},
+                        {"id": 21, "type": "material", "title": "A", "module_id": "m1", "syllabus_id": 0},
+                        {"id": 23, "type": "homework", "title": "Homework"},
+                    ])
+                if url.endswith("/modules"):
+                    return JsonResponse({"modules": [
+                        {"id": "m1", "name": "第一章", "syllabuses": []},
+                        {"id": "m2", "name": "第二章", "syllabuses": []},
+                    ]})
+                if url.endswith("/activities/21"):
+                    return JsonResponse({
+                        "id": 21,
+                        "type": "material",
+                        "title": "A",
+                        "module_id": "m1",
+                        "syllabus_id": 0,
+                        "uploads": [{
+                            "id": "u21",
+                            "reference_id": "r21",
+                            "name": "a.pdf",
+                            "size": 10,
+                            "status": "ready",
+                            "allow_download": True,
+                        }],
+                    })
+                if url.endswith("/activities/22"):
+                    return JsonResponse({
+                        "id": 22,
+                        "type": "material",
+                        "title": "B",
+                        "module_id": "m2",
+                        "syllabus_id": 0,
+                        "uploads": [{
+                            "id": "u22",
+                            "reference_id": "r22",
+                            "name": "b.pdf",
+                            "size": 20,
+                            "status": "ready",
+                            "allow_download": False,
+                        }],
+                    })
+                raise AssertionError(f"Unexpected request: {url}")
+
+        session = MultiActivitySession()
+        items = fetch_courseware(session, "1")
+        self.assertEqual([item.activity_id for item in items], ["21", "22"])
+        self.assertEqual(items[1].download_status, "可下载（平台版权保护）")
+        self.assertFalse(any(url.endswith("/activities/23") for url in session.urls))
 
 
 if __name__ == "__main__":

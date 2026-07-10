@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,7 @@ COURSE_ENDPOINTS = (
 )
 
 API_HEADERS = {**headers, "Accept": "application/json, text/plain, */*"}
+COURSEWARE_DETAIL_WORKERS = 8
 WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{number}" for number in range(1, 10)),
@@ -32,6 +34,8 @@ class CourseSummary:
     course_id: str
     title: str
     term: str = ""
+    semester_code: str = ""
+    search_text: str = ""
 
     @property
     def display_name(self) -> str:
@@ -61,6 +65,8 @@ class CoursewareItem:
             return "无附件"
         if self.upload_status != "ready":
             return "文件处理中"
+        if not self.allow_download:
+            return "可下载（平台版权保护）"
         return "可下载"
 
 
@@ -122,26 +128,34 @@ def fetch_courses(session) -> tuple[list[CourseSummary], str]:
             title = _first_value(raw, ("name", "title", "course_title", "course_name", "display_name"))
             if not course_id or not title:
                 continue
-            term = _first_value(raw, ("term_name", "semester_name", "term", "semester", "academic_year"), "")
+            academic_year = raw.get("academic_year")
+            if isinstance(academic_year, dict):
+                term = _first_value(academic_year, ("name", "code", "id"), "")
+            else:
+                term = academic_year or ""
+            if not term:
+                term = _first_value(raw, ("term_name", "semester_name", "term", "year"), "")
             if isinstance(term, dict):
                 term = _first_value(term, ("name", "code", "id"), "")
-            courses.append(CourseSummary(str(course_id), str(title), str(term)))
+            raw_semester = raw.get("semester")
+            if isinstance(raw_semester, dict):
+                semester_code = _first_value(raw_semester, ("code", "id", "name"), "")
+            else:
+                semester_code = raw_semester or term
+            courses.append(CourseSummary(
+                str(course_id),
+                str(title),
+                str(term),
+                str(semester_code or ""),
+                str(raw),
+            ))
 
         if courses:
-            courses.sort(key=lambda course: (course.term, course.title), reverse=True)
             return courses, endpoint
     raise RuntimeError("课程列表接口读取失败：" + "；".join(errors[:4]))
 
 
-def fetch_courseware(session, course_id: str) -> list[CoursewareItem]:
-    activities = _get_json(
-        session,
-        f"/api/course/{course_id}/courseware-activities",
-        "课件活动读取",
-    )
-    modules_payload = _get_json(session, f"/api/courses/{course_id}/modules", "课程章节读取")
-    modules = _unwrap_list(modules_payload, ("modules", "data", "items", "list"))
-
+def _module_lookup(modules: list) -> tuple[dict[str, str], dict[str, str]]:
     module_names: dict[str, str] = {}
     syllabus_names: dict[str, str] = {}
     for module in modules:
@@ -154,54 +168,126 @@ def fetch_courseware(session, course_id: str) -> list[CoursewareItem]:
                 syllabus_names[str(syllabus.get("id") or syllabus.get("syllabus_id") or "")] = str(
                     syllabus.get("summary") or syllabus.get("name") or ""
                 )
+    return module_names, syllabus_names
+
+
+def _courseware_order_lookup(modules: list) -> dict[tuple[str, str], tuple[int, int]]:
+    order: dict[tuple[str, str], tuple[int, int]] = {}
+    for module_index, module in enumerate(modules):
+        if not isinstance(module, dict):
+            continue
+        module_id = str(module.get("id") or "")
+        order[(module_id, "")] = (module_index, -1)
+        order[(module_id, "0")] = (module_index, -1)
+        for syllabus_index, syllabus in enumerate(module.get("syllabuses") or []):
+            if not isinstance(syllabus, dict):
+                continue
+            syllabus_id = str(syllabus.get("id") or syllabus.get("syllabus_id") or "")
+            order[(module_id, syllabus_id)] = (module_index, syllabus_index)
+    return order
+
+
+def _activity_number(activity: dict, fallback: int) -> int:
+    try:
+        return int(activity.get("id"))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _activity_order_key(
+    activity: dict,
+    order_lookup: dict[tuple[str, str], tuple[int, int]],
+    fallback_index: int,
+) -> tuple[int, int, int, int]:
+    module_id = str(activity.get("module_id") or "")
+    syllabus_id = str(activity.get("syllabus_id") or "")
+    module_order, syllabus_order = order_lookup.get(
+        (module_id, syllabus_id),
+        order_lookup.get((module_id, "0"), order_lookup.get((module_id, ""), (999999, 999999))),
+    )
+    return module_order, syllabus_order, _activity_number(activity, fallback_index), fallback_index
+
+
+def _courseware_items_from_detail(
+    course_id: str,
+    activity: dict,
+    detail: dict,
+    module_names: dict[str, str],
+    syllabus_names: dict[str, str],
+) -> list[CoursewareItem]:
+    uploads = detail.get("uploads") or []
+    common = {
+        "course_id": str(course_id),
+        "activity_id": str(activity["id"]),
+        "activity_title": str(detail.get("title") or activity.get("title") or "未命名课件"),
+        "activity_type": str(detail.get("type") or activity.get("type") or "material"),
+        "module_name": module_names.get(str(detail.get("module_id") or activity.get("module_id") or ""), "未分组"),
+        "syllabus_name": syllabus_names.get(str(detail.get("syllabus_id") or activity.get("syllabus_id") or ""), ""),
+        "published_at": str((detail.get("data") or {}).get("publish_time") or detail.get("created_at") or ""),
+    }
+    if not uploads:
+        return [CoursewareItem(
+            **common,
+            upload_id="",
+            reference_id="",
+            filename="",
+            size=0,
+            media_type="",
+            upload_status="",
+            allow_download=False,
+        )]
+
+    items = []
+    for upload in uploads:
+        if not isinstance(upload, dict):
+            continue
+        items.append(CoursewareItem(
+            **common,
+            upload_id=str(upload.get("id") or ""),
+            reference_id=str(upload.get("reference_id") or ""),
+            filename=str(upload.get("name") or common["activity_title"]),
+            size=int(upload.get("size") or 0),
+            media_type=str(upload.get("type") or "file"),
+            upload_status=str(upload.get("status") or ""),
+            allow_download=bool(upload.get("allow_download")),
+        ))
+    return items
+
+
+def fetch_courseware(session, course_id: str) -> list[CoursewareItem]:
+    activities = _get_json(
+        session,
+        f"/api/course/{course_id}/courseware-activities",
+        "课件活动读取",
+    )
+    modules_payload = _get_json(session, f"/api/courses/{course_id}/modules", "课程章节读取")
+    modules = _unwrap_list(modules_payload, ("modules", "data", "items", "list"))
+    module_names, syllabus_names = _module_lookup(modules)
+    order_lookup = _courseware_order_lookup(modules)
 
     raw_activities = activities if isinstance(activities, list) else _unwrap_list(
         activities, ("activities", "data", "items", "list")
     )
-    items: list[CoursewareItem] = []
-    for activity in raw_activities:
-        if not isinstance(activity, dict) or not activity.get("id"):
-            continue
-        if activity.get("type") == "homework":
-            continue
-        detail = _get_json(session, f"/api/activities/{activity['id']}", "课件详情读取")
-        uploads = detail.get("uploads") or []
-        common = {
-            "course_id": str(course_id),
-            "activity_id": str(activity["id"]),
-            "activity_title": str(detail.get("title") or activity.get("title") or "未命名课件"),
-            "activity_type": str(detail.get("type") or activity.get("type") or "material"),
-            "module_name": module_names.get(str(detail.get("module_id") or activity.get("module_id") or ""), "未分组"),
-            "syllabus_name": syllabus_names.get(str(detail.get("syllabus_id") or activity.get("syllabus_id") or ""), ""),
-            "published_at": str((detail.get("data") or {}).get("publish_time") or detail.get("created_at") or ""),
-        }
-        if not uploads:
-            items.append(CoursewareItem(
-                **common,
-                upload_id="",
-                reference_id="",
-                filename="",
-                size=0,
-                media_type="",
-                upload_status="",
-                allow_download=False,
-            ))
-            continue
-        for upload in uploads:
-            if not isinstance(upload, dict):
-                continue
-            items.append(CoursewareItem(
-                **common,
-                upload_id=str(upload.get("id") or ""),
-                reference_id=str(upload.get("reference_id") or ""),
-                filename=str(upload.get("name") or common["activity_title"]),
-                size=int(upload.get("size") or 0),
-                media_type=str(upload.get("type") or "file"),
-                upload_status=str(upload.get("status") or ""),
-                allow_download=bool(upload.get("allow_download")),
-            ))
 
-    items.sort(key=lambda item: (item.module_name, item.syllabus_name, item.published_at, item.activity_title))
+    courseware_activities = [
+        (index, activity)
+        for index, activity in enumerate(raw_activities)
+        if isinstance(activity, dict) and activity.get("id") and activity.get("type") != "homework"
+    ]
+    courseware_activities.sort(key=lambda indexed: _activity_order_key(indexed[1], order_lookup, indexed[0]))
+    ordered_activities = [activity for _index, activity in courseware_activities]
+
+    def load_activity_items(activity: dict) -> list[CoursewareItem]:
+        detail = _get_json(session, f"/api/activities/{activity['id']}", "课件详情读取")
+        return _courseware_items_from_detail(course_id, activity, detail, module_names, syllabus_names)
+
+    items: list[CoursewareItem] = []
+    if ordered_activities:
+        max_workers = min(COURSEWARE_DETAIL_WORKERS, len(ordered_activities))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for activity_items in executor.map(load_activity_items, ordered_activities):
+                items.extend(activity_items)
+
     return items
 
 

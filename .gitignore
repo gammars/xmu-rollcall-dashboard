@@ -1,11 +1,40 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
 /venv/
 /.venv/
+/env/
+/.env/
+
+# Local IDE/editor files
 /.idea/
-legacy/v3.0.1/info.txt
-.runtime/
-.xmu_rollcall/
-.agents/
-__pycache__/
-*.pyc
+/.vscode/
+*.swp
+*.swo
+
+# Local runtime/config data
+/.runtime/
+/.xmu_rollcall/
+/.agents/
+*.log
+
+# Build and package artifacts
+/build/
+/dist/
 /*.spec
 *.egg-info/
+*.whl
+*.tar.gz
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Legacy local notes
+legacy/v3.0.1/info.txt

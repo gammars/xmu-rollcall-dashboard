@@ -1,39 +1,39 @@
-# XMU 签到、成绩与课件看板
+> Forked from [KrsMt-0113/XMU-Rollcall-Bot](https://github.com/KrsMt-0113/XMU-Rollcall-Bot)
+> 课件下载实现参考[KrsMt-0113/XMUFD](https://github.com/KrsMt-0113/XMUFD)
+# XMU 签到与课件看板
 
-一个面向厦门大学 TronClass/LNT 与教务服务平台的 Windows 桌面工具。程序使用同一组学号和密码完成登录，在一个 Tkinter 界面中提供签到监控、课程签到总览、本人教务成绩查询，以及课程课件查看与授权下载。
+一个面向厦门大学 TronClass/LNT 的 Windows 桌面工具。程序使用 PySide6 构建浅色工业风格界面，提供签到监控、课程签到总览、课程课件查看与授权下载。
 
-登录成功或自动恢复登录态后，程序会在后台自动刷新课程签到总览、成绩和课件课程列表，并预加载默认课程的课件。网络请求不会阻塞界面；用户切换到相应页面时，通常可以直接看到已经加载的数据。
+登录成功或自动恢复登录态后，程序会在后台刷新课程签到总览和课件课程列表，并预加载默认课程的课件。网络请求在后台线程执行，课件详情会并发拉取，不会阻塞界面。
 
-## 开箱即用，同时保持开源
+> 本项目仅用于个人学习、研究和本人数据管理。请遵守学校、课程和平台规则。程序只应查询当前登录账号有权访问的数据，不应被用于绕过权限、访问他人信息或干扰平台服务。
 
-这个项目同时面向普通用户和希望继续开发的使用者：
+## 开箱即用
 
-- **普通用户可以开箱即用**：仓库的 `dist` 目录已经提供打包好的 Windows EXE，不需要安装 Python、Conda 或任何依赖，直接运行即可。
-- **开发者可以自由修改**：完整 Python 源码、依赖声明、测试和 PyInstaller 打包脚本都保留在仓库中，可以阅读实现、修改功能并重新生成 EXE。
+打包后的 Windows EXE 会生成到本地 `dist` 目录。普通用户运行 EXE 即可使用，不需要单独安装 Python 或 PySide6。
 
-### 普通用户
-
-直接运行最新版本：
-
-```text
-dist\XMU-Rollcall-Dashboard-Courseware.exe
-```
-
-打开程序后，在“总览”页输入学号和密码登录即可。登录完成后，程序会自动在后台加载课程签到总览、本人已公布成绩、课程列表和默认课程课件。
-
-EXE 已经包含 Python 解释器、Tkinter 和运行依赖。目标电脑只需要使用 Windows，并能够正常访问厦大相关平台。
-
-### 开发者
-
-开发者可以直接查看 `xmu-rollcall-cli/xmu_rollcall` 下的完整实现。修改源码后运行：
+开发者修改源码后运行：
 
 ```powershell
 .\scripts\build_dashboard_exe.bat
 ```
 
-即可在 `dist` 目录重新生成可分发的独立 EXE。项目因此既可以作为普通桌面软件使用，也可以作为厦大统一认证、TronClass 接口、教务成绩查询、Tkinter 异步界面和 PyInstaller 打包的学习与二次开发项目。
+即可在本地 `dist` 目录重新生成独立 EXE。`dist` 和 `build` 属于构建产物，默认不提交到 Git。
 
-> 本项目仅用于个人学习、研究和本人数据管理。请遵守学校、课程和平台规则。程序只应查询当前登录账号有权访问的数据，不应被用于绕过权限、访问他人信息或干扰平台服务。
+## 开发运行
+
+项目使用 Conda 环境：
+
+```powershell
+conda run -n xmu-rollcall-dashboard python -m pip install -r .\xmu-rollcall-cli\requirements.txt pyinstaller
+```
+
+开发时启动：
+
+```powershell
+$env:PYTHONPATH=(Resolve-Path .\xmu-rollcall-cli).Path
+conda run -n xmu-rollcall-dashboard python -m xmu_rollcall.desktop
+```
 
 ## 主要功能
 
@@ -43,7 +43,7 @@ EXE 已经包含 Python 解释器、Tkinter 和运行依赖。目标电脑只需
 - 保存当前账号配置和 TronClass Cookie。
 - 再次启动时自动尝试恢复 TronClass 登录态。
 - 支持退出登录并清除当前账号保存的 Cookie。
-- 支持通过环境变量修改本地配置目录。
+- 支持通过 `XMU_ROLLCALL_CONFIG_DIR` 修改本地配置目录。
 
 ### 签到监控
 
@@ -53,47 +53,84 @@ EXE 已经包含 Python 解释器、Tkinter 和运行依赖。目标电脑只需
 - 支持手动处理选中的数字签到或雷达签到。
 - 可选开启“检测后自动签到”。
 - 二维码签到不会自动处理，需要用户手动完成。
+- 总览页直接展示完整签到事件表，可在同一页启动监控、停止监控、处理选中签到或标记跳过。
 
 ### 课程签到总览
 
 - 拉取当前账号的课程列表和课程签到记录。
-- 支持按学年及第一、第二学期筛选。
+- 支持按学年、第一/第二/第三学期和时间范围筛选。
+- 时间范围支持今天、本周、本学期，默认显示本学期。
+- 按日期聚合展示签到记录。
+- 默认按未签、未知、已签、无记录排序。
 - 显示课程、签到时间、签到类型、签到状态和平台状态。
 - 支持只显示未签到记录。
-- 登录成功后自动在后台刷新，也可以手动刷新。
-
-### 成绩查询
-
-- 使用首页保存的同一组账号密码登录教务服务平台。
-- 只查询当前登录账号本人的已公布成绩。
-- 显示学期、课程名称、课程号、学分、成绩、绩点、课程性质和考核方式。
-- 根据接口返回的非零系数展示平时、期中、期末、实验及其他成绩构成。
-- 查询完成后默认选择最新有成绩的学期。
-- 支持在下拉框中切换其他学期或查看全部成绩。
-- 登录成功或自动恢复后自动在后台查询，也可以手动刷新。
 
 ### 课程课件
 
 - 从当前登录账号可见的课程列表中选择课程。
+- 支持按学年、第一/第二/第三学期和课程筛选，交互与“课程签到”页保持一致。
 - 读取课程发布的课件活动、章节、小节和附件信息。
+- 课程列表保持平台返回顺序；课件展示按平台章节树顺序排列。
+- 课件详情使用并发请求读取，以减少课程课件列表等待时间。
 - 显示文件名、类型、大小、发布时间、处理状态和下载权限。
-- 支持双击或点击按钮下载选中附件；仅可预览条目双击后打开平台页面。
-- 支持批量下载当前课程内全部获平台授权的附件。
+- 支持双击或点击按钮下载选中附件。
+- 支持按住 Ctrl 多选课件后下载选中项。
+- 支持批量下载当前课程内全部可下载附件。
+- 对 `allow_download=false` 但脚本可下载的附件显示为“可下载（平台版权保护）”，并允许下载。
 - 下载文件按课程保存到所选目录，重名文件不会覆盖已有文件。
-- 登录成功后自动读取课程列表并预加载默认课程课件。
-- 作业活动会在读取详情前被过滤，不显示，也不请求作业详情接口。
 
 ## 界面页面
 
 | 页面 | 作用 |
 | --- | --- |
-| 总览 | 登录、退出、启动或停止签到监控，查看最近事件和运行状态 |
-| 签到事件 | 查看所有检测到的签到，手动处理或跳过选中事件 |
-| 课程签到总览 | 查看课程签到历史，按学年、学期和未签状态筛选 |
-| 成绩查询 | 查看本人教务成绩，按学期筛选并查看成绩构成 |
-| 课程课件 | 选择课程，查看课件附件及下载权限，下载选中或全部可下载附件 |
+| 总览 | 登录、退出、启动或停止签到监控，查看所有签到事件，手动处理或跳过选中事件 |
+| 课程签到 | 查看课程签到历史，按学年、学期和未签状态筛选 |
+| 课程课件 | 按学年、学期和课程筛选课件，查看附件及下载权限，下载选中或全部可下载附件 |
 | 策略 | 设置签到轮询间隔和自动处理开关 |
 | 日志 | 查看登录、刷新、轮询和异常信息 |
+
+## 实现说明
+
+### 签到监控与数字签到码
+
+- 监控页通过 `GET /api/radar/rollcalls` 读取当前账号可见的签到事件。
+- 数字签到事件会先从监控结果中取得 `rollcall_id`。
+- 程序随后请求 `GET /api/rollcall/{rollcall_id}/student_rollcalls`，并在返回数据中递归查找 `number_code` 字段。
+- 手动处理或自动处理数字签到时，会提交到 `PUT /api/rollcall/{rollcall_id}/answer_number_rollcall`，请求体包含 `deviceId` 和 `numberCode`。
+
+### 雷达签到位置
+
+- 雷达签到提交接口是 `PUT /api/rollcall/{rollcall_id}/answer`，请求体包含经纬度、精度、设备 ID 等字段。
+- 当前代码没有直接读取“老师位置”的接口。
+- 如果平台返回距离信息，程序会用两个已知坐标提交后得到的 `distance` 进行圆交点估算，再尝试候选签到中心点。
+- 因此这里更准确地说是“通过距离反馈估算雷达签到中心点”，不是直接获取老师地理位置。
+
+### 课程课件读取
+
+- 课程列表通过课程接口探测读取，课程下拉保持平台返回顺序。
+- 课件活动通过 `GET /api/course/{course_id}/courseware-activities` 读取。
+- 章节信息通过 `GET /api/courses/{course_id}/modules` 读取。
+- 每个课件活动详情通过 `GET /api/activities/{activity_id}` 读取。详情请求会并发执行，但结果合并时按平台章节树顺序展示。
+- `homework` 类型活动会在请求详情前过滤，不作为课件展示。
+
+## Git 提交范围
+
+建议提交这些内容：
+
+- `README.md`、`LICENSE`、`.gitignore`
+- `scripts/` 下的构建入口和启动脚本
+- `xmu-rollcall-cli/` 下的源码、依赖声明和包配置
+- `tests/` 下的测试代码
+
+不要提交这些内容：
+
+- `build/`：PyInstaller 中间产物，可重新生成
+- `dist/`：本地打包 EXE，建议通过 Release 或网盘分发
+- `.xmu_rollcall/`：本地账号配置和 Cookie
+- `.runtime/`、`.agents/`：本地运行状态或工具目录
+- `.pytest_cache/`、`__pycache__/`、`*.pyc`：缓存文件
+- `venv/`、`.venv/`、`env/`、`.env/`：本地虚拟环境
+- `*.spec`：本地 PyInstaller 规格文件，当前项目通过 `scripts/build_dashboard_exe.bat` 重新生成
 
 ## 项目结构
 
@@ -101,7 +138,6 @@ EXE 已经包含 Python 解释器、Tkinter 和运行依赖。目标电脑只需
 xmu-rollcall-bot/
 ├── README.md
 ├── LICENSE
-├── .gitignore
 ├── scripts/
 │   ├── build_dashboard_exe.bat
 │   └── xmu_dashboard_launcher.py
@@ -110,433 +146,26 @@ xmu-rollcall-bot/
 │   ├── pyproject.toml
 │   ├── requirements.txt
 │   └── xmu_rollcall/
-│       ├── __init__.py
 │       ├── config.py
-│       ├── desktop.py
 │       ├── courseware.py
-│       ├── jw_grades.py
+│       ├── desktop.py
+│       ├── desktop_qt/
+│       │   ├── app.py
+│       │   ├── core.py
+│       │   └── theme.py
 │       ├── proxy_guard.py
 │       ├── utils.py
 │       └── verify.py
-├── tests/
-│   └── test_courseware.py
-├── build/                         # PyInstaller 中间产物，可重新生成
-└── dist/                          # 打包后的 EXE
+└── tests/
+    └── test_courseware.py
 ```
 
-### 核心模块
+## 本地配置
 
-#### `desktop.py`
-
-桌面程序主模块，负责：
-
-- 创建 Tkinter 窗口、标签页、表格和状态栏。
-- 接收用户登录、刷新、筛选和签到操作。
-- 启动登录、轮询、签到总览和成绩查询后台线程。
-- 使用线程安全队列把后台结果传回 Tkinter 主线程。
-- 在登录成功事件后自动触发签到总览和成绩查询。
-- 更新表格、摘要、日志和错误状态。
-
-所有 Tkinter 控件都由主线程更新。后台线程只执行网络请求，并将结果写入 `queue.Queue`，避免网络延迟导致窗口卡死。
-
-#### `config.py`
-
-负责本地配置和账号管理：
-
-- 计算配置目录。
-- 保存和读取 `config.json`。
-- 管理多个账号及当前账号。
-- 保存监控策略。
-- 生成每个账号对应的 Cookie 文件路径。
-
-#### `utils.py`
-
-提供 TronClass 通用能力：
-
-- 平台基础 URL 和请求头。
-- 带退避延迟的请求重试。
-- Cookie 保存与恢复。
-- 通过 `/api/profile` 检查登录态。
-
-#### `proxy_guard.py`
-
-在程序启动时关闭 `requests.Session` 对系统代理环境变量的继承，避免错误代理导致厦大平台请求失败。
-
-#### `verify.py`
-
-负责签到相关处理：
-
-- 从嵌套响应中提取数字签到码。
-- 提交数字签到结果。
-- 提交雷达签到结果。
-
-二维码签到不在该模块中自动处理。
-
-#### `jw_grades.py`
-
-负责教务服务平台登录与成绩查询：
-
-- 访问厦大统一身份认证页面。
-- 解析认证表单并加密密码。
-- 建立教务门户会话。
-- 打开当前账号有权限使用的“成绩查询”应用。
-- 请求学生成绩接口。
-- 将平台字段归一化为 `GradeRecord`。
-- 整理成绩构成系数供界面显示。
-
-#### `courseware.py`
-
-负责 LNT 课程和课件数据：
-
-- 读取当前账号可见的课程列表。
-- 请求课程课件活动、章节和附件详情接口。
-- 将平台字段归一化为 `CourseSummary` 和 `CoursewareItem`。
-- 严格依据 `allow_download` 和文件状态决定是否允许下载。
-- 对授权附件通过 `reference_id` 获取签名地址后下载。
-- 流式写入 `.part` 临时文件，完成后再改为最终文件名。
-- 清理 Windows 非法文件名并避免覆盖同名文件。
-
-#### `xmu_dashboard_launcher.py`
-
-PyInstaller 的最小启动入口，只负责导入并调用：
-
-```python
-from xmu_rollcall.desktop import main
-```
-
-#### `build_dashboard_exe.bat`
-
-Windows 一键打包脚本。它指定 Conda 环境、应用名称、源码搜索路径和 PyInstaller 参数。
-
-## 工作原理
-
-### 总体数据流
+默认配置目录为当前用户主目录下的：
 
 ```text
-用户操作 / 自动恢复
-        │
-        ▼
-Tkinter 主线程
-        │ 创建后台线程
-        ├───────────────┬──────────────────┬─────────────────┐
-        ▼               ▼                  ▼                 ▼
-TronClass 登录/签到   课程签到总览       教务成绩查询      课程与课件
-        │               │                  │                 │
-        └───────────────┴──────────────────┴─────────────────┘
-                        │
-                        ▼
-                   queue.Queue
-                        │
-                        ▼
-              主线程更新表格和日志
+~\.xmu_rollcall
 ```
 
-### TronClass 登录与恢复
-
-1. 用户在首页输入学号和密码。
-2. `xmulogin(type=3)` 完成 TronClass 登录并返回 `requests.Session`。
-3. 程序访问 `/api/profile` 获取姓名并验证会话。
-4. Cookie 保存到当前账号对应的 JSON 文件。
-5. 下次启动时读取 Cookie，并再次访问 `/api/profile` 验证。
-6. Cookie 有效则产生与手动登录相同的 `login_success` 事件。
-
-因此，手动登录和自动恢复后续走的是同一套自动刷新流程。
-
-### 登录后的自动刷新
-
-主线程收到 `login_success` 后会立即启动三个互不阻塞的后台任务：
-
-1. 刷新当前学年和默认学期范围内的课程签到总览。
-2. 登录教务平台并查询全部已公布成绩。
-3. 读取 LNT 课程列表，并预加载默认课程的课件。
-
-自动刷新失败时只更新页面状态和日志，不弹出错误窗口。用户手动点击刷新时，如果失败则会显示错误对话框。
-
-程序使用刷新中标记避免同一功能在前一次请求尚未结束时重复发起并发请求。
-
-### 签到监控
-
-1. 用户点击“启动监控”。
-2. `MonitorWorker` 按设置的间隔轮询当前签到接口。
-3. 新签到通过 ID 去重后写入队列。
-4. 主线程把签到添加到“总览”和“签到事件”表格。
-5. 数字签到会额外在后台读取签到码。
-6. 未开启自动签到时，程序只显示事件并等待用户操作。
-
-### 成绩查询
-
-TronClass 和教务平台属于不同系统，Cookie 不能直接共用。因此成绩查询会使用保存的同一组账号密码建立独立教务会话：
-
-1. 登录统一身份认证系统。
-2. 初始化教务门户会话及路由 Cookie。
-3. 打开成绩查询应用，建立应用级会话。
-4. 请求当前学生成绩接口。
-5. 解析平台返回的课程和成绩字段。
-6. 将结果发送回主线程。
-7. 根据学期代码选中最新有成绩的学期。
-
-如果学校调整认证流程、应用编号或接口字段，`jw_grades.py` 可能需要同步更新。
-
-### 课件查询与下载
-
-1. 程序通过与课程签到总览相同的课程列表接口读取当前账号可见课程。
-2. 通过 `/api/course/{course_id}/courseware-activities` 读取课程课件活动。
-3. 通过课程章节接口和活动详情接口补全章节、附件、文件大小与权限。
-4. 用户选择下载时，程序再次检查附件必须处于 `ready` 状态且 `allow_download=true`。
-5. 对已授权附件，通过 `/api/uploads/reference/{reference_id}/url` 获取签名地址，再流式下载。
-6. 下载期间先写入 `.part` 文件，成功后再原子改名；失败时清理临时文件。
-
-课件列表中没有下载按钮或平台返回 `allow_download=false` 时，应用只展示课件信息，不尝试绕过平台授权。类型为 `homework` 的活动会在详情请求前过滤。
-
-## 环境准备
-
-推荐使用独立 Conda 环境：
-
-```powershell
-conda create -y -n xmu-rollcall-dashboard python=3.11
-conda run -n xmu-rollcall-dashboard python -m pip install -r .\xmu-rollcall-cli\requirements.txt pyinstaller
-```
-
-主要依赖：
-
-| 依赖 | 用途 |
-| --- | --- |
-| Python 3.11+ | 程序运行环境 |
-| requests | HTTP 会话与接口请求 |
-| pycryptodome | 统一认证密码加密 |
-| xmulogin | 厦大统一认证和 TronClass 登录 |
-| Tkinter | Windows 桌面界面，通常随 Python/Conda 提供 |
-| PyInstaller | 生成 Windows EXE，仅打包时需要 |
-
-## 从源码运行
-
-在仓库根目录执行：
-
-```powershell
-$env:PYTHONPATH=(Resolve-Path .\xmu-rollcall-cli).Path
-conda run -n xmu-rollcall-dashboard python -m xmu_rollcall.desktop
-```
-
-如果已经安装本项目，也可以使用命令入口：
-
-```powershell
-conda run -n xmu-rollcall-dashboard xmu-dashboard
-```
-
-## 使用方法
-
-### 首次登录
-
-1. 启动程序。
-2. 在“总览”页输入学号和密码。
-3. 点击“登录”。
-4. 等待状态变为“已登录”。
-5. 程序会自动刷新签到总览、成绩和课件。
-
-### 查看课程签到
-
-1. 打开“课程签到总览”。
-2. 查看自动加载的记录。
-3. 需要查询其他范围时修改学年和学期。
-4. 点击“刷新课程签到数据”。
-5. 勾选“只显示未签”可过滤结果。
-
-### 查看成绩
-
-1. 打开“成绩查询”。
-2. 等待自动查询完成。
-3. 默认显示最新有成绩的学期。
-4. 使用学期下拉框查看其他学期或全部成绩。
-5. “成绩构成”仅展示教务接口实际返回的非零系数，不代表平台一定公开了各组成部分的具体分数。
-
-### 查看与下载课件
-
-1. 打开“课程课件”页。
-2. 从课程下拉框选择课程，程序会自动读取该课程课件。
-3. 查看每个附件的文件名、大小和下载权限。
-4. 选择可下载附件并点击“下载选中”，也可以双击该行；仅可预览条目会打开平台页面。
-5. 点击“下载全部可下载课件”可批量下载当前课程获授权的全部附件。
-6. 点击“选择目录”可修改根下载目录；文件会保存到以课程名命名的子目录中。
-
-### 启动签到监控
-
-1. 登录成功后点击“启动监控”。
-2. 在总览或“签到事件”页查看检测结果。
-3. 未开启自动签到时，选择事件并点击“立即处理选中签到”。
-4. 点击“停止监控”可结束轮询。
-
-## 打包 Windows EXE
-
-执行：
-
-```powershell
-.\scripts\build_dashboard_exe.bat
-```
-
-脚本执行的核心命令等价于：
-
-```powershell
-python -m PyInstaller `
-  --noconfirm `
-  --clean `
-  --windowed `
-  --onefile `
-  --name XMU-Rollcall-Dashboard-Courseware `
-  --paths .\xmu-rollcall-cli `
-  --collect-submodules xmu_rollcall `
-  --collect-submodules xmulogin `
-  .\scripts\xmu_dashboard_launcher.py
-```
-
-参数说明：
-
-| 参数 | 作用 |
-| --- | --- |
-| `--noconfirm` | 自动覆盖同名构建输出 |
-| `--clean` | 清理 PyInstaller 缓存后重新分析依赖 |
-| `--windowed` | 不显示命令行窗口 |
-| `--onefile` | 将程序和依赖打包成单个 EXE |
-| `--name` | 设置最终程序文件名 |
-| `--paths` | 将源码包目录加入模块搜索路径 |
-| `--collect-submodules` | 显式收集动态导入或不易自动发现的子模块 |
-
-成功后生成：
-
-```text
-dist\XMU-Rollcall-Dashboard-Courseware.exe
-```
-
-打包后的 EXE 不要求目标电脑安装 Python 或 Conda，但仍需要：
-
-- Windows 系统。
-- 能正常访问厦大统一认证、TronClass 和教务平台的网络环境。
-- 学校平台当前接口与程序实现兼容。
-
-如果同名 EXE 正在运行，Windows 会锁定文件并导致覆盖失败。请先关闭旧程序，或修改 `APP_NAME` 生成另一个文件名。
-
-## 哪些文件是必要的
-
-### 从源码运行所需
-
-- `xmu-rollcall-cli/xmu_rollcall/` 下全部 Python 模块。
-- 已安装运行依赖的 Python 环境。
-- 设置正确的 `PYTHONPATH`，或者安装项目包。
-
-### 使用当前脚本重新打包所需
-
-- `scripts/xmu_dashboard_launcher.py`
-- `scripts/build_dashboard_exe.bat`
-- `xmu-rollcall-cli/xmu_rollcall/` 下全部模块
-- `xmu-rollcall-cli/requirements.txt`
-- Conda 环境 `xmu-rollcall-dashboard`
-- PyInstaller 及运行依赖
-
-### 不影响运行的辅助文件
-
-- `README.md`
-- `LICENSE`
-- `tests/`
-- `xmu-rollcall-cli/README.md`
-- 已经安装好依赖时的 `requirements.txt`
-- 直接通过 `--paths` 打包时的 `pyproject.toml`
-
-这些文件不进入核心运行流程，但建议在源码仓库中保留，便于维护、测试和重新部署。
-
-### 可以重新生成或删除的产物
-
-- `build/`
-- `__pycache__/`
-- `*.pyc`
-- 自动生成的根目录 `*.spec`
-- 不再需要的旧版 EXE
-
-最终分发给普通用户时，只需要提供 `dist` 中最新的 EXE。
-
-## 本地配置与安全
-
-默认配置目录：
-
-```text
-%USERPROFILE%\.xmu_rollcall
-```
-
-典型内容：
-
-```text
-.xmu_rollcall/
-├── config.json       # 账号、密码和当前账号配置
-├── 1.json            # 账号 1 的 TronClass Cookie
-└── 2.json            # 账号 2 的 TronClass Cookie
-```
-
-可以通过环境变量修改位置：
-
-```powershell
-$env:XMU_ROLLCALL_CONFIG_DIR="D:\path\to\config"
-```
-
-当前实现会在本地配置文件中保存密码和 Cookie，未使用操作系统凭据保险库加密。请注意：
-
-- 不要把 `.xmu_rollcall` 提交到 Git。
-- 不要把配置目录发送给他人。
-- 不要在公共电脑上保存账号。
-- 退出登录会删除当前账号的 Cookie，但账号配置仍可能保留在 `config.json` 中。
-
-## 测试
-
-运行单元测试：
-
-```powershell
-$env:PYTHONPATH=(Resolve-Path .\xmu-rollcall-cli).Path
-conda run -n xmu-rollcall-dashboard python -m unittest discover -s tests -v
-```
-
-执行语法检查：
-
-```powershell
-conda run -n xmu-rollcall-dashboard python -m compileall -q .\xmu-rollcall-cli\xmu_rollcall .\tests
-```
-
-## 常见问题
-
-### 登录失败
-
-- 检查学号和密码是否正确。
-- 检查统一认证是否新增验证码或二次验证。
-- 尝试使用浏览器正常登录学校平台，确认账号没有被锁定。
-
-### 自动恢复失败
-
-- Cookie 可能已经过期，回到总览页重新输入密码登录。
-- 确认配置目录中的 Cookie 文件没有损坏。
-
-### 成绩查询失败但 TronClass 正常
-
-- TronClass 与教务平台是两套独立会话，前者登录成功不代表后者一定可用。
-- 检查教务服务平台是否正在维护。
-- 如果认证或成绩应用入口发生变化，需要更新 `jw_grades.py`。
-
-### 打包时提示拒绝访问 EXE
-
-- 同名 EXE 仍在运行。
-- 在任务管理器中关闭对应程序后重新打包。
-- 或修改 `build_dashboard_exe.bat` 中的 `APP_NAME`。
-
-### 打包成功但程序打不开
-
-- 查看 `build/<应用名>/warn-<应用名>.txt`。
-- 从源码运行一次，以便看到完整异常。
-- 确认 PyInstaller 收集了 `xmu_rollcall`、`xmulogin`、Tkinter 和 Crypto 依赖。
-
-## 维护建议
-
-- 平台接口字段发生变化时，优先在归一化层兼容，不要把平台原始字段散落到 UI 中。
-- 新网络操作应放入后台线程，禁止在 Tkinter 主线程中直接发请求。
-- 后台线程不应直接更新控件，应通过队列交给主线程处理。
-- 查询范围必须限制为当前登录账号有权访问的数据。
-- 修改课件权限、文件名或下载逻辑后运行 `tests/test_courseware.py`。
-- 发布新版前至少完成语法检查、单元测试、真实登录查询和 EXE 启动测试。
-
-## License
-
-MIT
+其中 `config.json` 保存账号和策略配置，`1.json`、`2.json` 等文件保存对应账号的 Cookie。该目录属于当前 Windows 用户，免安装 EXE 也可以正常读写。
