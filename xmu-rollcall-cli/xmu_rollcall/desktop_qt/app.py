@@ -720,11 +720,8 @@ class DashboardWindow(QMainWindow):
             account = get_current_account(load_config())
             if not account:
                 return
-            cookies_path = get_cookies_path(account.get("id", 1))
-            if not os.path.exists(cookies_path):
-                return
             self._set_login_status("正在自动恢复会话...", warn=True)
-            self.log("检测到上次登录会话，正在自动恢复。")
+            self.log("正在恢复登录：先检查 Cookie，失败后使用已保存的账号密码。")
             self._run_thread(self._restore_worker, True)
         except Exception as exc:
             self.log(f"自动恢复检查失败：{exc}")
@@ -736,15 +733,29 @@ class DashboardWindow(QMainWindow):
                 self._emit(("restore_failed", "没有可恢复的当前账号，请先登录。", silent))
                 return
             session = requests.Session()
-            if not load_session(session, get_cookies_path(account.get("id", 1))):
-                self._emit(("restore_failed", "Cookie 读取失败，请重新登录。", silent))
+            cookies_path = get_cookies_path(account.get("id", 1))
+            if load_session(session, cookies_path) and verify_session(session):
+                save_session(session, cookies_path)
+                self._emit(("login_success", session, account))
                 return
-            if not verify_session(session):
-                self._emit(("restore_failed", "登录态已失效，请重新登录。", silent))
+            session.close()
+
+            username = account.get("username", "")
+            password = account.get("password", "")
+            if not username or not password:
+                self._emit(("restore_failed", "Cookie 不可用，且没有已保存的完整账号密码，请手动登录。", silent))
                 return
+            self._emit(("restore_progress", "Cookie 不可用，正在使用已保存的密码重新登录..."))
+            session = xmulogin(type=3, username=username, password=password)
+            if not session or not verify_session(session):
+                if session is not None:
+                    session.close()
+                self._emit(("restore_failed", "自动重新登录失败，请检查网络或手动输入账号密码登录。", silent))
+                return
+            save_session(session, cookies_path)
             self._emit(("login_success", session, account))
-        except Exception as exc:
-            self._emit(("restore_failed", str(exc), silent))
+        except Exception:
+            self._emit(("restore_failed", "恢复登录失败，请检查网络或手动登录。", silent))
 
     def logout(self):
         if not self.account and not self.session:
@@ -1166,6 +1177,9 @@ class DashboardWindow(QMainWindow):
             self.metric_account.setText("未登录")
             self.log(f"登录失败：{event[1]}")
             QMessageBox.critical(self, "登录失败", event[1])
+        elif kind == "restore_progress":
+            self._set_login_status("正在自动重新登录...", warn=True)
+            self.log(event[1])
         elif kind == "restore_failed":
             _, message, silent = event
             self._set_login_status("未登录", warn=True)
