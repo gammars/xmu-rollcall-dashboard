@@ -35,6 +35,8 @@ DEFAULT_ROLLCALL_SETTINGS = {
     "wait_before_answer_mode": "none",
     "wait_before_answer_count_min": 0,
     "wait_before_answer_count_max": 0,
+    "attendance_threshold_enabled": True,
+    "attendance_threshold_percent": 10,
 }
 
 DEFAULT_CONFIG = {
@@ -54,6 +56,7 @@ def normalize_rollcall_settings(settings: dict | None) -> dict:
         "radar_delay_max",
         "wait_before_answer_count_min",
         "wait_before_answer_count_max",
+        "attendance_threshold_percent",
     ):
         try:
             merged[key] = max(0, int(merged.get(key, DEFAULT_ROLLCALL_SETTINGS[key])))
@@ -67,9 +70,15 @@ def normalize_rollcall_settings(settings: dict | None) -> dict:
     if merged["wait_before_answer_count_max"] < merged["wait_before_answer_count_min"]:
         merged["wait_before_answer_count_max"] = merged["wait_before_answer_count_min"]
 
+    merged["attendance_threshold_percent"] = min(
+        100,
+        max(1, merged["attendance_threshold_percent"]),
+    )
+
     if merged.get("wait_before_answer_mode") not in ("none", "fixed", "random"):
         merged["wait_before_answer_mode"] = "none"
     merged["manual_confirm"] = bool(merged.get("manual_confirm", False))
+    merged["attendance_threshold_enabled"] = bool(merged.get("attendance_threshold_enabled", True))
     return merged
 
 

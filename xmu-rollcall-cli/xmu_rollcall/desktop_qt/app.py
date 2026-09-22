@@ -11,12 +11,13 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import requests
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import QObject, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -32,6 +33,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QStackedWidget,
+    QStyle,
+    QStyleOptionButton,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -44,6 +47,7 @@ from .. import __version__
 from ..config import (
     add_account,
     get_all_accounts,
+    get_account_by_id,
     get_cookies_path,
     get_current_account,
     get_rollcall_settings,
@@ -68,10 +72,12 @@ from .core import (
     DEFAULT_POLL_INTERVAL_SECONDS,
     CourseRollcallRecord,
     MonitorWorker,
+    RollcallRoster,
     RollcallEvent,
     current_academic_year_label,
     fetch_course_rollcall_records,
     fetch_number_code,
+    fetch_rollcall_roster,
     format_duration,
     normalize_time,
 )
@@ -83,6 +89,25 @@ disable_system_proxies()
 
 class EventBus(QObject):
     event = Signal(object)
+
+
+class CheckmarkCheckBox(QCheckBox):
+    """Keep a visible check mark over the theme's filled checkbox indicator."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.isChecked():
+            option = QStyleOptionButton()
+            self.initStyleOption(option)
+            rect = self.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, self)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(QColor("white"), 2, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawLine(QPointF(rect.left() + 4, rect.center().y()),
+                             QPointF(rect.left() + 7, rect.bottom() - 4))
+            painter.drawLine(QPointF(rect.left() + 7, rect.bottom() - 4),
+                             QPointF(rect.right() - 3, rect.top() + 4))
 
 
 COURSE_STATUS_DISPLAY = {
@@ -110,6 +135,86 @@ COURSE_STATUS_COLORS = {
 }
 
 
+class RollcallRosterDialog(QDialog):
+    def __init__(self, course_title: str, rollcall_id: str, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle(f"签到名单 - {course_title}")
+        self.resize(1080, 620)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel(course_title)
+        title.setObjectName("PageTitle")
+        self.summary = QLabel(f"签到 ID：{rollcall_id}；正在读取名单...")
+        self.summary.setObjectName("Subtle")
+        layout.addWidget(title)
+        layout.addWidget(self.summary)
+
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(
+            ("姓名", "学号", "班级", "院系", "签到状态", "签到时间", "距离", "状态详情")
+        )
+        self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        for index, width in enumerate((110, 130, 150, 190, 100, 165, 100, 180)):
+            self.table.setColumnWidth(index, width)
+        layout.addWidget(self.table, 1)
+
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.close)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+    def set_roster(self, roster: RollcallRoster):
+        self.table.setRowCount(0)
+        status_counts: dict[str, int] = {}
+        for row, student in enumerate(roster.students):
+            self.table.insertRow(row)
+            status_counts[student.rollcall_status] = status_counts.get(student.rollcall_status, 0) + 1
+            values = (
+                student.name,
+                student.user_no,
+                student.klass,
+                student.department,
+                student.rollcall_status,
+                student.rollcall_time,
+                student.distance,
+                student.status_detail,
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column in (1, 4, 5, 6):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if column == 4:
+                    status_key = COURSE_STATUS_DISPLAY.get(str(value), str(value))
+                    foreground, background = COURSE_STATUS_COLORS.get(
+                        status_key,
+                        ("#8a5a00", "#fff4ce"),
+                    )
+                    item.setForeground(QColor(foreground))
+                    item.setBackground(QColor(background))
+                self.table.setItem(row, column, item)
+
+        counts = "；".join(f"{status} {count}" for status, count in status_counts.items())
+        self.summary.setText(
+            f"签到 ID：{roster.rollcall_id}；共 {len(roster.students)} 人"
+            + (f"；{counts}" if counts else "；暂无名单记录")
+        )
+
+    def set_error(self, message: str):
+        self.summary.setText(f"名单读取失败：{message}")
+
+
 class DashboardWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -133,6 +238,9 @@ class DashboardWindow(QMainWindow):
         self.courseware_courses: list[CourseSummary] = []
         self.courseware_items: list[CoursewareItem] = []
         self.courseware_course_by_display: dict[str, CourseSummary] = {}
+        self.roster_dialogs: dict[str, RollcallRosterDialog] = {}
+        self.strategy_pending_ids: set[str] = set()
+        self.strategy_checks_in_progress: set[str] = set()
 
         self.course_refresh_in_progress = False
         self.courseware_courses_refresh_in_progress = False
@@ -145,6 +253,10 @@ class DashboardWindow(QMainWindow):
         self.runtime_timer = QTimer(self)
         self.runtime_timer.timeout.connect(self._tick_runtime)
         self.runtime_timer.start(1000)
+
+        self.strategy_timer = QTimer(self)
+        self.strategy_timer.timeout.connect(self._check_pending_strategies)
+        self.strategy_timer.start(5000)
 
         QTimer.singleShot(400, self.auto_restore_current_session)
 
@@ -269,24 +381,27 @@ class DashboardWindow(QMainWindow):
         start_button.clicked.connect(self.start_monitor)
         stop_button = QPushButton("停止监控")
         stop_button.clicked.connect(self.stop_monitor)
+        self.auto_answer_check = CheckmarkCheckBox("开启自动签到（谨慎）")
+        self.auto_answer_check.toggled.connect(self._toggle_auto_answer)
         answer_button = QPushButton("立即处理选中签到")
         answer_button.setObjectName("PrimaryButton")
         answer_button.clicked.connect(self.answer_selected_rollcall)
         skip_button = QPushButton("标记为跳过")
         skip_button.clicked.connect(self.skip_selected_rollcall)
-        self.auto_answer_check = QCheckBox("检测后自动签到（谨慎）")
         control_layout.addWidget(start_button)
         control_layout.addWidget(stop_button)
         control_layout.addWidget(answer_button)
         control_layout.addWidget(skip_button)
-        control_layout.addWidget(self.auto_answer_check)
         control_layout.addStretch(1)
+        control_layout.addWidget(self.auto_answer_check)
         layout.addWidget(control_panel)
 
         self.events_table = self._make_table(
             ("时间", "课程", "发起人", "类型", "平台状态", "签到码", "处理状态", "详情"),
             (92, 240, 170, 100, 110, 90, 110, 320),
         )
+        self.events_table.setToolTip("双击签到记录查看实时名单")
+        self.events_table.cellDoubleClicked.connect(self._open_overview_roster)
         layout.addWidget(self.events_table, 1)
         return page
 
@@ -333,6 +448,8 @@ class DashboardWindow(QMainWindow):
             ("日期", "课程", "签到时间", "类型", "状态", "平台状态", "签到 ID", "详情"),
             (130, 260, 160, 100, 90, 120, 100, 320),
         )
+        self.course_table.setToolTip("双击签到记录查看实时名单")
+        self.course_table.cellDoubleClicked.connect(self._open_course_roster)
         layout.addWidget(self.course_table, 1)
         return page
 
@@ -417,9 +534,30 @@ class DashboardWindow(QMainWindow):
         self.poll_interval_spin.setValue(DEFAULT_POLL_INTERVAL_SECONDS)
         panel_layout.addWidget(QLabel("轮询间隔（秒）"), 0, 0)
         panel_layout.addWidget(self.poll_interval_spin, 0, 1)
-        note = QLabel("看板默认只提醒并等待手动确认。开启自动签到后，会在检测到数字/雷达签到时直接提交。")
+
+        self.attendance_threshold_enabled_check = QCheckBox("启用签到比例提醒")
+        self.attendance_threshold_enabled_check.setChecked(True)
+        self.attendance_threshold_spin = QSpinBox()
+        self.attendance_threshold_spin.setRange(1, 100)
+        self.attendance_threshold_spin.setValue(10)
+        self.attendance_threshold_spin.setSuffix(" %")
+        self.attendance_threshold_enabled_check.toggled.connect(self.attendance_threshold_spin.setEnabled)
+        panel_layout.addWidget(QLabel("人数达到比例"), 1, 0)
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(self.attendance_threshold_enabled_check)
+        threshold_row.addWidget(self.attendance_threshold_spin)
+        threshold_row.addStretch(1)
+        panel_layout.addLayout(threshold_row, 1, 1)
+
+        save_button = QPushButton("保存策略")
+        save_button.setObjectName("PrimaryButton")
+        save_button.clicked.connect(self.save_rollcall_strategy)
+        panel_layout.addWidget(save_button, 2, 1, Qt.AlignmentFlag.AlignLeft)
+
+        note = QLabel("每 5 秒检查签到比例。总览中开启自动签到后，达到阈值直接提交；关闭时仅提醒。自动签到仅在本次登录期间有效，停止监控后关闭；二维码仍需手动扫码。")
         note.setObjectName("Subtle")
-        panel_layout.addWidget(note, 1, 0, 1, 2)
+        note.setWordWrap(True)
+        panel_layout.addWidget(note, 3, 0, 1, 2)
         layout.addWidget(panel)
         layout.addStretch(1)
         return page
@@ -500,8 +638,40 @@ class DashboardWindow(QMainWindow):
             account = get_current_account(load_config())
             if account:
                 self.username_input.setText(account.get("username", ""))
+                self._apply_rollcall_settings(account)
         except Exception as exc:
             self.log(f"读取配置失败：{exc}")
+
+    def _apply_rollcall_settings(self, account: dict):
+        settings = get_rollcall_settings(account)
+        self.attendance_threshold_enabled_check.setChecked(
+            settings["attendance_threshold_enabled"]
+        )
+        self.attendance_threshold_spin.setValue(settings["attendance_threshold_percent"])
+
+    def save_rollcall_strategy(self):
+        if not self.account:
+            QMessageBox.warning(self, "尚未登录", "请先登录后再保存签到策略。")
+            return
+        try:
+            config = load_config()
+            account = get_account_by_id(config, self.account.get("id"))
+            if not account:
+                raise RuntimeError("当前账号不在配置文件中")
+            settings = get_rollcall_settings(account)
+            settings.update({
+                "attendance_threshold_enabled": self.attendance_threshold_enabled_check.isChecked(),
+                "attendance_threshold_percent": self.attendance_threshold_spin.value(),
+            })
+            set_rollcall_settings(account, settings)
+            save_config(config)
+            self.account["rollcall_settings"] = account["rollcall_settings"].copy()
+            if not settings["attendance_threshold_enabled"]:
+                self.strategy_pending_ids.clear()
+            self.log(f"签到比例提醒策略已保存：{self.attendance_threshold_spin.value()}%。")
+            QMessageBox.information(self, "保存成功", "签到策略已保存到当前账号。")
+        except Exception as exc:
+            QMessageBox.critical(self, "保存失败", str(exc))
 
     def login(self):
         username = self.username_input.text().strip()
@@ -588,6 +758,10 @@ class DashboardWindow(QMainWindow):
         account = self.account
         self.session = None
         self.account = None
+        self.strategy_pending_ids.clear()
+        self.strategy_checks_in_progress.clear()
+        for dialog in tuple(self.roster_dialogs.values()):
+            dialog.close()
         self.password_input.clear()
         self._set_login_status("未登录", warn=True)
         self.metric_account.setText("未登录")
@@ -631,9 +805,27 @@ class DashboardWindow(QMainWindow):
         self.log("监控已启动。")
 
     def stop_monitor(self):
+        self.auto_answer_check.setChecked(False)
         if self.monitor_stop_event:
             self.monitor_stop_event.set()
         self.log("正在停止监控。")
+
+    def _toggle_auto_answer(self, enabled: bool):
+        if enabled and (not self.session or not self.account):
+            self.auto_answer_check.setChecked(False)
+            QMessageBox.warning(self, "尚未登录", "请先登录后再开启自动签到。")
+            return
+        self.attendance_threshold_enabled_check.setEnabled(not enabled)
+        if enabled:
+            self.attendance_threshold_enabled_check.setChecked(True)
+            self.start_monitor()
+            for event_id, event in self.events_by_id.items():
+                if event.result in ("待处理", "等待阈值", "可处理"):
+                    self.strategy_pending_ids.add(event_id)
+            self.log(f"自动签到已开启：达到 {self.attendance_threshold_spin.value()}% 后自动提交。")
+            self._check_pending_strategies()
+        else:
+            self.log("自动签到已关闭；已经提交的请求不受影响。")
 
     def answer_selected_rollcall(self):
         event_id = self._selected_event_id()
@@ -645,6 +837,9 @@ class DashboardWindow(QMainWindow):
     def skip_selected_rollcall(self):
         event_id = self._selected_event_id()
         if event_id:
+            if self.events_by_id[event_id].result in ("处理中", "已签到"):
+                return
+            self.strategy_pending_ids.discard(event_id)
             self._update_event_result(event_id, "已跳过", "用户手动跳过")
 
     def _selected_event_id(self) -> str:
@@ -653,23 +848,131 @@ class DashboardWindow(QMainWindow):
             return ""
         return self.events_table.item(row, 0).data(Qt.ItemDataRole.UserRole) or ""
 
-    def _answer_event(self, event_id: str, event: RollcallEvent):
+    def _open_overview_roster(self, row: int, _column: int):
+        item = self.events_table.item(row, 0)
+        event_id = item.data(Qt.ItemDataRole.UserRole) if item else ""
+        event = self.events_by_id.get(event_id)
+        if event:
+            self._open_rollcall_roster(event.rollcall_id, event.course_title)
+
+    def _open_course_roster(self, row: int, _column: int):
+        item = self.course_table.item(row, 0)
+        if not item:
+            return
+        rollcall_id = item.data(Qt.ItemDataRole.UserRole)
+        course_title = item.data(int(Qt.ItemDataRole.UserRole) + 1)
+        if rollcall_id:
+            self._open_rollcall_roster(str(rollcall_id), str(course_title or "课程签到"))
+
+    def _open_rollcall_roster(self, rollcall_id: str, course_title: str):
         if not self.session:
             QMessageBox.warning(self, "尚未登录", "请先登录。")
             return
-        if event.rollcall_type == "二维码签到":
-            self._update_event_result(event_id, "需手动", "二维码签到需要手动扫码")
-            QMessageBox.information(self, "需要手动处理", "二维码签到暂不支持自动处理，请手动扫码。")
+        if not rollcall_id or rollcall_id == "-":
+            QMessageBox.information(self, "无签到名单", "该课程记录没有有效的签到 ID。")
             return
-        self._update_event_result(event_id, "处理中", "正在提交")
-        self._run_thread(self._answer_worker, event_id, event)
 
-    def _answer_worker(self, event_id: str, event: RollcallEvent):
+        existing = self.roster_dialogs.get(rollcall_id)
+        if existing:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        dialog = RollcallRosterDialog(course_title, rollcall_id, self)
+        self.roster_dialogs[rollcall_id] = dialog
+        dialog.finished.connect(lambda _result, key=rollcall_id: self.roster_dialogs.pop(key, None))
+        dialog.show()
+        self.log(f"按需读取签到名单：{course_title} / {rollcall_id}")
+        self._run_thread(self._rollcall_roster_worker, rollcall_id)
+
+    def _rollcall_roster_worker(self, rollcall_id: str):
+        try:
+            roster = fetch_rollcall_roster(self.session, rollcall_id)
+            self._emit(("rollcall_roster", rollcall_id, roster))
+        except Exception as exc:
+            self._emit(("rollcall_roster_error", rollcall_id, str(exc)))
+
+    def _check_pending_strategies(self):
+        if not self.session or not self.attendance_threshold_enabled_check.isChecked():
+            return
+        for event_id in tuple(self.strategy_pending_ids):
+            if event_id not in self.strategy_checks_in_progress:
+                self.strategy_checks_in_progress.add(event_id)
+                self._run_thread(self._strategy_check_worker, event_id)
+
+    def _strategy_check_worker(self, event_id: str):
+        event = self.events_by_id.get(event_id)
+        if not event:
+            self._emit(("strategy_check_error", event_id, "签到事件已不存在"))
+            return
+        try:
+            roster = fetch_rollcall_roster(self.session, event.rollcall_id)
+            self._emit(("strategy_check", event_id, roster))
+        except Exception as exc:
+            self._emit(("strategy_check_error", event_id, str(exc)))
+
+    def _handle_strategy_check(self, event_id: str, roster: RollcallRoster):
+        self.strategy_checks_in_progress.discard(event_id)
+        if (event_id not in self.strategy_pending_ids or not self.session
+                or not self.attendance_threshold_enabled_check.isChecked()):
+            return
+
+        total = len(roster.students)
+        signed = sum(
+            student.rollcall_status in ("已签到", "迟到")
+            for student in roster.students
+        )
+        percent = signed * 100 / total if total else 0
+        threshold = self.attendance_threshold_spin.value()
+        if roster.status.lower() in ("finished", "closed", "ended"):
+            self.strategy_pending_ids.discard(event_id)
+            self._update_event_result(event_id, "已结束", f"签到结束时比例为 {percent:.1f}%（{signed}/{total}）")
+            return
+        if total and percent >= threshold:
+            self.strategy_pending_ids.discard(event_id)
+            detail = f"签到比例 {percent:.1f}%（{signed}/{total}），已达到 {threshold}%"
+            self._update_event_result(event_id, "可处理", detail)
+            self.metric_last_result.setText("签到比例已达阈值")
+            self.log(detail)
+            event = self.events_by_id.get(event_id)
+            if self.auto_answer_check.isChecked() and event:
+                self._answer_event(event_id, event, automatic=True)
+                return
+            QMessageBox.information(
+                self,
+                "签到比例已达阈值",
+                f"{event.course_title if event else '课程签到'}\n{detail}\n请在总览中手动确认处理。",
+            )
+            return
+
+        self._update_event_result(
+            event_id,
+            "等待阈值",
+            f"当前签到比例 {percent:.1f}%（{signed}/{total}），目标 {threshold}%",
+        )
+
+    def _answer_event(self, event_id: str, event: RollcallEvent, automatic: bool = False):
+        if event.result in ("处理中", "已签到", "已结束"):
+            return
+        if not self.session:
+            QMessageBox.warning(self, "尚未登录", "请先登录。")
+            return
+        self.strategy_pending_ids.discard(event_id)
+        if event.rollcall_type not in ("数字签到", "雷达签到"):
+            self._update_event_result(event_id, "需手动", f"{event.rollcall_type}需要手动处理")
+            if not automatic:
+                QMessageBox.information(self, "需要手动处理", "该签到类型暂不支持自动处理，请手动完成。")
+            return
+        self._update_event_result(event_id, "处理中", "达到阈值，自动提交中" if automatic else "正在提交")
+        self._run_thread(self._answer_worker, event_id, event, self.session)
+
+    def _answer_worker(self, event_id: str, event: RollcallEvent, session):
         try:
             if event.rollcall_type == "数字签到":
-                ok = send_code(self.session, event.rollcall_id)
+                ok = send_code(session, event.rollcall_id)
             elif event.rollcall_type == "雷达签到":
-                ok = send_radar(self.session, event.rollcall_id)
+                ok = send_radar(session, event.rollcall_id)
             else:
                 ok = False
             self._emit(("answer_result", event_id, ok, "提交成功" if ok else "提交失败"))
@@ -844,11 +1147,18 @@ class DashboardWindow(QMainWindow):
         kind = event[0]
         if kind == "login_success":
             _, session, account = event
+            self.auto_answer_check.setChecked(False)
+            self.strategy_pending_ids.clear()
+            self.strategy_checks_in_progress.clear()
+            self.events_by_id.clear()
+            self.event_order.clear()
+            self._refresh_event_tables()
             self.session = session
             self.account = account
             display = account.get("name") or account.get("username") or "已登录"
             self._set_login_status("已登录", warn=False)
             self.metric_account.setText(display)
+            self._apply_rollcall_settings(account)
             self.log(f"登录成功：{display}")
             self._refresh_after_login()
         elif kind == "login_failed":
@@ -883,6 +1193,23 @@ class DashboardWindow(QMainWindow):
             code = event[2]
             detail = event[3] if len(event) > 3 else ""
             self._update_event_code(event_id, code, detail)
+        elif kind == "rollcall_roster":
+            _, rollcall_id, roster = event
+            dialog = self.roster_dialogs.get(rollcall_id)
+            if dialog:
+                dialog.set_roster(roster)
+        elif kind == "rollcall_roster_error":
+            _, rollcall_id, message = event
+            dialog = self.roster_dialogs.get(rollcall_id)
+            if dialog:
+                dialog.set_error(message)
+            self.log(f"签到名单读取失败：{rollcall_id} / {message}")
+        elif kind == "strategy_check":
+            self._handle_strategy_check(event[1], event[2])
+        elif kind == "strategy_check_error":
+            _, event_id, message = event
+            self.strategy_checks_in_progress.discard(event_id)
+            self.log(f"签到比例检查失败：{message}")
         elif kind == "course_rollcalls":
             _, records, source = event
             self.course_refresh_in_progress = False
@@ -955,8 +1282,14 @@ class DashboardWindow(QMainWindow):
 
         if event.rollcall_type == "数字签到":
             self._run_thread(self._number_code_worker, event_id, event)
-        if self.auto_answer_check.isChecked():
-            self._answer_event(event_id, event)
+        if self.attendance_threshold_enabled_check.isChecked():
+            self.strategy_pending_ids.add(event_id)
+            self._update_event_result(
+                event_id,
+                "等待阈值",
+                f"等待签到比例达到 {self.attendance_threshold_spin.value()}%",
+            )
+            self._check_pending_strategies()
 
     def _number_code_worker(self, event_id: str, event: RollcallEvent):
         try:
@@ -1091,6 +1424,9 @@ class DashboardWindow(QMainWindow):
         )
         for column, value in enumerate(values):
             item = QTableWidgetItem(str(value))
+            if column == 0 and record.rollcall_id and record.rollcall_id != "-":
+                item.setData(Qt.ItemDataRole.UserRole, record.rollcall_id)
+                item.setData(int(Qt.ItemDataRole.UserRole) + 1, record.course_title)
             if column in (0, 2, 3, 4, 5, 6):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if column == 4:

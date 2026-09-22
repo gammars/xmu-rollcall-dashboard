@@ -55,6 +55,26 @@ class CourseRollcallRecord:
     detail: str = ""
 
 
+@dataclass
+class StudentRollcallRecord:
+    name: str
+    user_no: str
+    klass: str
+    department: str
+    rollcall_status: str
+    rollcall_time: str
+    distance: str
+    status_detail: str
+
+
+@dataclass
+class RollcallRoster:
+    rollcall_id: str
+    title: str
+    status: str
+    students: list[StudentRollcallRecord]
+
+
 class MonitorWorker(threading.Thread):
     """Poll rollcall events in a background thread and emit tuple events."""
 
@@ -307,6 +327,96 @@ def fetch_student_rollcall_detail(session, rollcall_id: str):
     except Exception:
         pass
     return None
+
+
+def display_nested_value(value, keys: tuple[str, ...] = ("name", "title", "code")) -> str:
+    if isinstance(value, dict):
+        return str(first_value(value, keys, "-") or "-")
+    if isinstance(value, list):
+        parts = [display_nested_value(item, keys) for item in value]
+        return "、".join(part for part in parts if part != "-") or "-"
+    return str(value if value not in (None, "") else "-")
+
+
+def normalize_student_rollcall_status(value) -> str:
+    raw = str(value or "unknown").strip().lower()
+    labels = {
+        "on_call_fine": "已签到",
+        "present": "已签到",
+        "signed": "已签到",
+        "attended": "已签到",
+        "fine": "已签到",
+        "absent": "未签到",
+        "missed": "未签到",
+        "not_signed": "未签到",
+        "unanswered": "未签到",
+        "late": "迟到",
+        "leave": "请假",
+        "excused": "请假",
+    }
+    return labels.get(raw, str(value or "未知"))
+
+
+def normalize_distance(value) -> str:
+    if value in (None, ""):
+        return "-"
+    if isinstance(value, (int, float)):
+        return f"{value:g} 米"
+    text = str(value).strip()
+    if not text:
+        return "-"
+    try:
+        return f"{float(text):g} 米"
+    except ValueError:
+        return text
+
+
+def parse_rollcall_roster(rollcall_id: str, payload) -> RollcallRoster:
+    if not isinstance(payload, dict):
+        raise RuntimeError("签到名单接口未返回有效 JSON 对象")
+
+    raw_students = unwrap_list(payload, ("student_rollcalls", "students", "data", "items", "list", "results"))
+    students = []
+    for raw in raw_students:
+        if not isinstance(raw, dict):
+            continue
+        students.append(StudentRollcallRecord(
+            name=str(first_value(raw, ("name", "user_name", "student_name", "nickname"), "-") or "-"),
+            user_no=str(first_value(raw, ("user_no", "student_no", "number", "username"), "-") or "-"),
+            klass=display_nested_value(first_value(raw, ("klass", "class", "class_name"), "-")),
+            department=display_nested_value(first_value(raw, ("department", "department_name", "college"), "-")),
+            rollcall_status=normalize_student_rollcall_status(
+                first_value(raw, ("rollcall_status", "status", "state"), "unknown")
+            ),
+            rollcall_time=normalize_time(first_value(raw, ("updated_at", "answered_at", "submitted_at"), "")),
+            distance=normalize_distance(first_value(raw, ("distance", "distance_meters"), "")),
+            status_detail=display_nested_value(first_value(raw, ("status_detail", "comment", "grade"), "-")),
+        ))
+
+    return RollcallRoster(
+        rollcall_id=str(rollcall_id),
+        title=str(first_value(payload, ("title", "name"), "签到名单") or "签到名单"),
+        status=str(first_value(payload, ("status", "state"), "unknown") or "unknown"),
+        students=students,
+    )
+
+
+def fetch_rollcall_roster(session, rollcall_id: str) -> RollcallRoster:
+    if not rollcall_id or rollcall_id == "-":
+        raise RuntimeError("该记录没有有效的签到 ID")
+    response = session.get(
+        f"{base_url}/api/rollcall/{rollcall_id}/student_rollcalls",
+        headers=headers,
+        timeout=20,
+    )
+    if response.status_code in (401, 403):
+        raise RuntimeError("登录态已失效或当前账号无权查看签到名单")
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("签到名单接口未返回 JSON 数据") from exc
+    return parse_rollcall_roster(rollcall_id, payload)
 
 
 def fetch_number_code(session, rollcall_id: str) -> str:
