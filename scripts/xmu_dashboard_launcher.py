@@ -20,9 +20,19 @@ def smoke_test(report_path):
         window = DashboardWindow()
         window.show()
         app.processEvents()
-        assert window.auto_answer_check.text() == "开启自动签到（谨慎）"
+        assert window.auto_answer_check.text() == "开启策略自动签到"
         assert not window.auto_answer_check.isChecked()
-        data = {"ok": True, "qt": qVersion(), "button": window.auto_answer_check.text()}
+        assert window.location_table.columnCount() == 5
+        assert window.course_table.columnCount() == 11
+        assert window.events_table.columnCount() == 9
+        data = {
+            "ok": True,
+            "qt": qVersion(),
+            "button": window.auto_answer_check.text(),
+            "location_columns": window.location_table.columnCount(),
+            "course_columns": window.course_table.columnCount(),
+            "overview_columns": window.events_table.columnCount(),
+        }
         window.close()
         app.processEvents()
     except Exception:

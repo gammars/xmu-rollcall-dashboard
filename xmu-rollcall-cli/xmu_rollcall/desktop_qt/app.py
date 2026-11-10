@@ -6,6 +6,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 import webbrowser
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -46,6 +48,7 @@ from xmulogin import xmulogin
 from .. import __version__
 from ..config import (
     add_account,
+    delete_location_preset,
     get_all_accounts,
     get_account_by_id,
     get_cookies_path,
@@ -74,9 +77,10 @@ from .core import (
     MonitorWorker,
     RollcallRoster,
     RollcallEvent,
+    RollcallSnapshot,
     current_academic_year_label,
     fetch_course_rollcall_records,
-    fetch_number_code,
+    fetch_rollcall_snapshot,
     fetch_rollcall_roster,
     format_duration,
     normalize_time,
@@ -381,7 +385,7 @@ class DashboardWindow(QMainWindow):
         start_button.clicked.connect(self.start_monitor)
         stop_button = QPushButton("停止监控")
         stop_button.clicked.connect(self.stop_monitor)
-        self.auto_answer_check = CheckmarkCheckBox("开启自动签到（谨慎）")
+        self.auto_answer_check = CheckmarkCheckBox("开启策略自动签到")
         self.auto_answer_check.toggled.connect(self._toggle_auto_answer)
         answer_button = QPushButton("立即处理选中签到")
         answer_button.setObjectName("PrimaryButton")
@@ -397,8 +401,8 @@ class DashboardWindow(QMainWindow):
         layout.addWidget(control_panel)
 
         self.events_table = self._make_table(
-            ("时间", "课程", "发起人", "类型", "平台状态", "签到码", "处理状态", "详情"),
-            (92, 240, 170, 100, 110, 90, 110, 320),
+            ("时间", "课程", "发起人", "类型", "平台状态", "签到码", "到课人数", "策略状态", "处理结果"),
+            (92, 220, 150, 95, 105, 85, 95, 130, 270),
         )
         self.events_table.setToolTip("双击签到记录查看实时名单")
         self.events_table.cellDoubleClicked.connect(self._open_overview_roster)
@@ -445,8 +449,8 @@ class DashboardWindow(QMainWindow):
         layout.addWidget(toolbar)
 
         self.course_table = self._make_table(
-            ("日期", "课程", "签到时间", "类型", "状态", "平台状态", "签到 ID", "详情"),
-            (130, 260, 160, 100, 90, 120, 100, 320),
+            ("日期", "课程", "签到时间", "截止时间", "类型", "本人状态", "到课人数", "签到码", "平台状态", "签到 ID", "详情"),
+            (105, 210, 150, 150, 95, 90, 90, 85, 105, 90, 260),
         )
         self.course_table.setToolTip("双击签到记录查看实时名单")
         self.course_table.cellDoubleClicked.connect(self._open_course_roster)
@@ -526,7 +530,7 @@ class DashboardWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        panel = self._panel("监控策略")
+        panel = self._panel("自动签到")
         panel_layout = QGridLayout(panel)
         panel_layout.setContentsMargins(16, 40, 16, 16)
         self.poll_interval_spin = QSpinBox()
@@ -535,7 +539,7 @@ class DashboardWindow(QMainWindow):
         panel_layout.addWidget(QLabel("轮询间隔（秒）"), 0, 0)
         panel_layout.addWidget(self.poll_interval_spin, 0, 1)
 
-        self.attendance_threshold_enabled_check = QCheckBox("启用签到比例提醒")
+        self.attendance_threshold_enabled_check = QCheckBox("启用数字与雷达共用的到课比例阈值")
         self.attendance_threshold_enabled_check.setChecked(True)
         self.attendance_threshold_spin = QSpinBox()
         self.attendance_threshold_spin.setRange(1, 100)
@@ -559,6 +563,58 @@ class DashboardWindow(QMainWindow):
         note.setWordWrap(True)
         panel_layout.addWidget(note, 3, 0, 1, 2)
         layout.addWidget(panel)
+
+        location_panel = self._panel("雷达地点")
+        location_layout = QGridLayout(location_panel)
+        location_layout.setContentsMargins(16, 40, 16, 16)
+        self.location_name_input = QLineEdit()
+        self.location_name_input.setPlaceholderText("例如：海韵教学楼")
+        self.location_latitude_spin = QDoubleSpinBox()
+        self.location_latitude_spin.setRange(-90, 90)
+        self.location_latitude_spin.setDecimals(7)
+        self.location_latitude_spin.setValue(24.0)
+        self.location_longitude_spin = QDoubleSpinBox()
+        self.location_longitude_spin.setRange(-180, 180)
+        self.location_longitude_spin.setDecimals(7)
+        self.location_longitude_spin.setValue(118.0)
+        self.location_accuracy_spin = QSpinBox()
+        self.location_accuracy_spin.setRange(1, 1000)
+        self.location_accuracy_spin.setValue(35)
+        location_layout.addWidget(QLabel("名称"), 0, 0)
+        location_layout.addWidget(self.location_name_input, 0, 1)
+        location_layout.addWidget(QLabel("纬度"), 0, 2)
+        location_layout.addWidget(self.location_latitude_spin, 0, 3)
+        location_layout.addWidget(QLabel("经度"), 0, 4)
+        location_layout.addWidget(self.location_longitude_spin, 0, 5)
+        location_layout.addWidget(QLabel("精度（米）"), 0, 6)
+        location_layout.addWidget(self.location_accuracy_spin, 0, 7)
+        add_location = QPushButton("新增地点")
+        add_location.clicked.connect(self._add_location_preset)
+        update_location = QPushButton("更新选中")
+        update_location.clicked.connect(self._update_location_preset)
+        delete_location = QPushButton("删除选中地点")
+        delete_location.clicked.connect(self._delete_location_preset)
+        location_layout.addWidget(add_location, 0, 8)
+        location_layout.addWidget(update_location, 0, 9)
+        location_layout.addWidget(delete_location, 0, 10)
+
+        self.location_table = self._make_table(("名称", "纬度", "经度", "精度", "地点 ID"), (160, 120, 120, 80, 250))
+        self.location_table.setMaximumHeight(170)
+        self.location_table.cellClicked.connect(self._load_selected_location)
+        location_layout.addWidget(self.location_table, 1, 0, 1, 11)
+        self.binding_course_combo = QComboBox()
+        self.binding_course_combo.setMinimumWidth(250)
+        self.binding_location_combo = QComboBox()
+        self.binding_location_combo.setMinimumWidth(200)
+        bind_button = QPushButton("绑定课程地点")
+        bind_button.setObjectName("PrimaryButton")
+        bind_button.clicked.connect(self._bind_course_location)
+        location_layout.addWidget(QLabel("课程"), 2, 0)
+        location_layout.addWidget(self.binding_course_combo, 2, 1, 1, 3)
+        location_layout.addWidget(QLabel("地点"), 2, 4)
+        location_layout.addWidget(self.binding_location_combo, 2, 5, 1, 3)
+        location_layout.addWidget(bind_button, 2, 8, 1, 3)
+        layout.addWidget(location_panel)
         layout.addStretch(1)
         return page
 
@@ -635,7 +691,9 @@ class DashboardWindow(QMainWindow):
 
     def _load_current_account_hint(self):
         try:
-            account = get_current_account(load_config())
+            config = load_config()
+            account = get_current_account(config)
+            self._refresh_location_controls(config)
             if account:
                 self.username_input.setText(account.get("username", ""))
                 self._apply_rollcall_settings(account)
@@ -648,6 +706,131 @@ class DashboardWindow(QMainWindow):
             settings["attendance_threshold_enabled"]
         )
         self.attendance_threshold_spin.setValue(settings["attendance_threshold_percent"])
+        self._refresh_location_controls(load_config())
+
+    def _refresh_location_controls(self, config: dict | None = None):
+        if not hasattr(self, "location_table"):
+            return
+        config = config or load_config()
+        presets = config.get("location_presets", [])
+        rows = [(p["name"], p["latitude"], p["longitude"], p["accuracy"], p["id"]) for p in presets]
+        self._set_table_rows(self.location_table, rows)
+        self.binding_location_combo.clear()
+        for preset in presets:
+            self.binding_location_combo.addItem(preset["name"], preset["id"])
+        self._refresh_binding_courses()
+
+    def _refresh_binding_courses(self):
+        if not hasattr(self, "binding_course_combo"):
+            return
+        current = self.binding_course_combo.currentData()
+        courses: dict[str, str] = {}
+        for course in self.courseware_courses:
+            courses[str(course.course_id)] = course.title
+        for record in self.course_records:
+            courses[str(record.course_id)] = record.course_title
+        self.binding_course_combo.clear()
+        for course_id, title in sorted(courses.items(), key=lambda item: item[1]):
+            self.binding_course_combo.addItem(f"{title}（{course_id}）", course_id)
+        index = self.binding_course_combo.findData(current)
+        if index >= 0:
+            self.binding_course_combo.setCurrentIndex(index)
+
+    def _add_location_preset(self):
+        name = self.location_name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "缺少名称", "请输入地点名称。")
+            return
+        config = load_config()
+        config.setdefault("location_presets", []).append({
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "latitude": self.location_latitude_spin.value(),
+            "longitude": self.location_longitude_spin.value(),
+            "accuracy": self.location_accuracy_spin.value(),
+        })
+        save_config(config)
+        self.location_name_input.clear()
+        self._refresh_location_controls(config)
+        self.log(f"已新增雷达地点：{name}")
+
+    def _load_selected_location(self, row: int, _column: int):
+        if row < 0:
+            return
+        self.location_name_input.setText(self.location_table.item(row, 0).text())
+        self.location_latitude_spin.setValue(float(self.location_table.item(row, 1).text()))
+        self.location_longitude_spin.setValue(float(self.location_table.item(row, 2).text()))
+        self.location_accuracy_spin.setValue(round(float(self.location_table.item(row, 3).text())))
+
+    def _update_location_preset(self):
+        row = self.location_table.currentRow()
+        if row < 0 or not self.location_table.item(row, 4):
+            QMessageBox.information(self, "未选择", "请先选择一个地点。")
+            return
+        name = self.location_name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "缺少名称", "请输入地点名称。")
+            return
+        preset_id = self.location_table.item(row, 4).text()
+        config = load_config()
+        preset = next((item for item in config.get("location_presets", []) if str(item.get("id")) == preset_id), None)
+        if not preset:
+            QMessageBox.warning(self, "地点不存在", "该地点已被删除，请刷新后重试。")
+            return
+        if preset.get("built_in"):
+            QMessageBox.information(self, "系统地点", "系统自带地点不可修改；可以新增一个自定义地点。")
+            return
+        preset.update({
+            "name": name,
+            "latitude": self.location_latitude_spin.value(),
+            "longitude": self.location_longitude_spin.value(),
+            "accuracy": self.location_accuracy_spin.value(),
+        })
+        save_config(config)
+        self._refresh_location_controls(config)
+        self.log(f"已更新雷达地点：{name}")
+
+    def _delete_location_preset(self):
+        row = self.location_table.currentRow()
+        if row < 0 or not self.location_table.item(row, 4):
+            QMessageBox.information(self, "未选择", "请先选择一个地点。")
+            return
+        preset_id = self.location_table.item(row, 4).text()
+        name = self.location_table.item(row, 0).text()
+        config = load_config()
+        preset = next((item for item in config.get("location_presets", []) if str(item.get("id")) == preset_id), None)
+        if preset and preset.get("built_in"):
+            QMessageBox.information(self, "系统地点", "系统自带地点不可删除。")
+            return
+        if QMessageBox.question(self, "删除地点", f"删除“{name}”并移除所有相关课程绑定？") != QMessageBox.StandardButton.Yes:
+            return
+        removed = delete_location_preset(config, preset_id)
+        save_config(config)
+        self._refresh_location_controls(config)
+        if self.account:
+            refreshed = get_account_by_id(config, self.account.get("id"))
+            if refreshed:
+                self.account["rollcall_settings"] = refreshed["rollcall_settings"].copy()
+        QMessageBox.information(self, "已删除", f"地点已删除，同时移除 {removed} 个课程绑定。")
+
+    def _bind_course_location(self):
+        if not self.account:
+            QMessageBox.warning(self, "尚未登录", "请先登录。")
+            return
+        course_id = self.binding_course_combo.currentData()
+        preset_id = self.binding_location_combo.currentData()
+        if not course_id or not preset_id:
+            QMessageBox.warning(self, "无法绑定", "请先选择课程和地点。")
+            return
+        config = load_config()
+        account = get_account_by_id(config, self.account.get("id"))
+        settings = get_rollcall_settings(account)
+        title = self.binding_course_combo.currentText().split("（", 1)[0]
+        settings["course_location_bindings"][str(course_id)] = {"preset_id": str(preset_id), "course_title": title}
+        set_rollcall_settings(account, settings)
+        save_config(config)
+        self.account["rollcall_settings"] = account["rollcall_settings"].copy()
+        QMessageBox.information(self, "绑定成功", f"课程“{title}”已绑定到“{self.binding_location_combo.currentText()}”。")
 
     def save_rollcall_strategy(self):
         if not self.account:
@@ -918,35 +1101,67 @@ class DashboardWindow(QMainWindow):
             self._emit(("strategy_check_error", event_id, "签到事件已不存在"))
             return
         try:
-            roster = fetch_rollcall_roster(self.session, event.rollcall_id)
-            self._emit(("strategy_check", event_id, roster))
+            snapshot = fetch_rollcall_snapshot(self.session, event.rollcall_id)
+            self._emit(("strategy_check", event_id, snapshot))
         except Exception as exc:
             self._emit(("strategy_check_error", event_id, str(exc)))
 
-    def _handle_strategy_check(self, event_id: str, roster: RollcallRoster):
+    def _handle_strategy_check(self, event_id: str, snapshot: RollcallSnapshot):
         self.strategy_checks_in_progress.discard(event_id)
         if (event_id not in self.strategy_pending_ids or not self.session
                 or not self.attendance_threshold_enabled_check.isChecked()):
             return
 
-        total = len(roster.students)
-        signed = sum(
-            student.rollcall_status in ("已签到", "迟到")
-            for student in roster.students
-        )
+        event = self.events_by_id.get(event_id)
+        if not event:
+            return
+        # Keep the handler tolerant of a legacy roster object while old saved
+        # jobs/tests drain; live checks always provide RollcallSnapshot.
+        if isinstance(snapshot, RollcallRoster):
+            total = len(snapshot.students)
+            signed = sum(student.rollcall_status in ("已签到", "迟到") for student in snapshot.students)
+            snapshot = RollcallSnapshot(
+                rollcall_id=snapshot.rollcall_id, course_id=event.course_id,
+                course_title=event.course_title, rollcall_time="", utc_date="",
+                end_time="", status=snapshot.status, rollcall_type=event.rollcall_type,
+                number_code=event.number_code, signed_count=signed, total_count=total,
+                student_rollcalls=[], raw={},
+            )
+        event.course_id = snapshot.course_id
+        event.status = snapshot.status
+        event.end_time = snapshot.end_time
+        event.signed_count = snapshot.signed_count
+        event.total_count = snapshot.total_count
+        if snapshot.number_code:
+            event.number_code = snapshot.number_code
+        total = snapshot.total_count
+        signed = snapshot.signed_count
         percent = signed * 100 / total if total else 0
         threshold = self.attendance_threshold_spin.value()
-        if roster.status.lower() in ("finished", "closed", "ended"):
+        if snapshot.ended:
             self.strategy_pending_ids.discard(event_id)
+            event.strategy_status = "平台已结束"
             self._update_event_result(event_id, "已结束", f"签到结束时比例为 {percent:.1f}%（{signed}/{total}）")
+            return
+        if not total:
+            event.strategy_status = "无有效名单"
+            self._update_event_result(event_id, "等待数据", "平台未返回学生状态，禁止自动提交")
             return
         if total and percent >= threshold:
             self.strategy_pending_ids.discard(event_id)
             detail = f"签到比例 {percent:.1f}%（{signed}/{total}），已达到 {threshold}%"
+            if event.rollcall_type == "数字签到" and not event.number_code:
+                event.strategy_status = "签到码为空"
+                self._update_event_result(event_id, "不可提交", detail + "，但签到码为空")
+                return
+            if event.rollcall_type == "雷达签到" and not self._location_for_event(event):
+                event.strategy_status = "未配置地点"
+                self._update_event_result(event_id, "未配置地点", detail + "，课程未绑定雷达地点")
+                return
+            event.strategy_status = "已达阈值"
             self._update_event_result(event_id, "可处理", detail)
             self.metric_last_result.setText("签到比例已达阈值")
             self.log(detail)
-            event = self.events_by_id.get(event_id)
             if self.auto_answer_check.isChecked() and event:
                 self._answer_event(event_id, event, automatic=True)
                 return
@@ -957,6 +1172,7 @@ class DashboardWindow(QMainWindow):
             )
             return
 
+        event.strategy_status = f"等待 {threshold}%"
         self._update_event_result(
             event_id,
             "等待阈值",
@@ -975,20 +1191,46 @@ class DashboardWindow(QMainWindow):
             if not automatic:
                 QMessageBox.information(self, "需要手动处理", "该签到类型暂不支持自动处理，请手动完成。")
             return
+        if event.rollcall_type == "雷达签到":
+            preset = self._location_for_event(event)
+            if not preset:
+                self._update_event_result(event_id, "未配置地点", "该课程尚未绑定雷达地点")
+                return
+            if not automatic and QMessageBox.question(
+                self,
+                "确认雷达签到",
+                f"将使用地点：{preset['name']}\n坐标：{preset['latitude']}, {preset['longitude']}\n精度：{preset['accuracy']} 米\n\n确认提交？",
+            ) != QMessageBox.StandardButton.Yes:
+                return
         self._update_event_result(event_id, "处理中", "达到阈值，自动提交中" if automatic else "正在提交")
         self._run_thread(self._answer_worker, event_id, event, self.session)
 
     def _answer_worker(self, event_id: str, event: RollcallEvent, session):
         try:
             if event.rollcall_type == "数字签到":
-                ok = send_code(session, event.rollcall_id)
+                ok = (send_code(session, event.rollcall_id, event.number_code) if event.number_code
+                      else send_code(session, event.rollcall_id))
             elif event.rollcall_type == "雷达签到":
-                ok = send_radar(session, event.rollcall_id)
+                preset = self._location_for_event(event)
+                ok = bool(preset) and send_radar(
+                    session, event.rollcall_id, preset["latitude"], preset["longitude"], preset["accuracy"]
+                )
             else:
                 ok = False
             self._emit(("answer_result", event_id, ok, "提交成功" if ok else "提交失败"))
         except Exception as exc:
             self._emit(("answer_result", event_id, False, str(exc)))
+
+    def _location_for_event(self, event: RollcallEvent) -> dict | None:
+        if not self.account or not event.course_id:
+            return None
+        settings = get_rollcall_settings(self.account)
+        binding = settings["course_location_bindings"].get(str(event.course_id))
+        if not isinstance(binding, dict):
+            return None
+        preset_id = str(binding.get("preset_id") or "")
+        config = load_config()
+        return next((item for item in config.get("location_presets", []) if str(item.get("id")) == preset_id), None)
 
     def refresh_course_rollcalls(self, silent=False):
         if not self.session or not self.account:
@@ -1202,11 +1444,21 @@ class DashboardWindow(QMainWindow):
             self._update_event_result(event_id, "已签到" if ok else "失败", detail)
             self.metric_last_result.setText(detail)
             self.log(f"签到处理结果：{detail}")
-        elif kind == "number_code":
-            event_id = event[1]
-            code = event[2]
-            detail = event[3] if len(event) > 3 else ""
-            self._update_event_code(event_id, code, detail)
+        elif kind == "rollcall_snapshot":
+            _, event_id, snapshot = event
+            tracked = self.events_by_id.get(event_id)
+            if tracked:
+                tracked.course_id = snapshot.course_id
+                tracked.status = snapshot.status
+                tracked.end_time = snapshot.end_time
+                tracked.number_code = snapshot.number_code
+                tracked.signed_count = snapshot.signed_count
+                tracked.total_count = snapshot.total_count
+                tracked.detail = "快照已更新"
+                self._refresh_event_tables()
+        elif kind == "rollcall_snapshot_error":
+            _, event_id, message = event
+            self._update_event_result(event_id, "数据异常", f"快照读取失败：{message}")
         elif kind == "rollcall_roster":
             _, rollcall_id, roster = event
             dialog = self.roster_dialogs.get(rollcall_id)
@@ -1229,6 +1481,7 @@ class DashboardWindow(QMainWindow):
             self.course_refresh_in_progress = False
             self.course_records = records
             self._refresh_course_table()
+            self._refresh_binding_courses()
             self.log(f"课程签到总览刷新完成。{source}")
         elif kind == "course_rollcalls_error":
             self.course_refresh_in_progress = False
@@ -1294,9 +1547,11 @@ class DashboardWindow(QMainWindow):
         self.log(f"检测到签到：{event.course_title} / {event.rollcall_type}")
         self._refresh_event_tables()
 
-        if event.rollcall_type == "数字签到":
-            self._run_thread(self._number_code_worker, event_id, event)
-        if self.attendance_threshold_enabled_check.isChecked():
+        self._run_thread(self._snapshot_worker, event_id, event)
+        if event.rollcall_type == "二维码签到":
+            event.strategy_status = "仅提醒"
+            self._update_event_result(event_id, "需手动", "二维码签到需手动扫码")
+        elif self.attendance_threshold_enabled_check.isChecked():
             self.strategy_pending_ids.add(event_id)
             self._update_event_result(
                 event_id,
@@ -1305,11 +1560,11 @@ class DashboardWindow(QMainWindow):
             )
             self._check_pending_strategies()
 
-    def _number_code_worker(self, event_id: str, event: RollcallEvent):
+    def _snapshot_worker(self, event_id: str, event: RollcallEvent):
         try:
-            self._emit(("number_code", event_id, fetch_number_code(self.session, event.rollcall_id)))
+            self._emit(("rollcall_snapshot", event_id, fetch_rollcall_snapshot(self.session, event.rollcall_id)))
         except Exception as exc:
-            self._emit(("number_code", event_id, "", str(exc)))
+            self._emit(("rollcall_snapshot_error", event_id, str(exc)))
 
     def _event_values(self, event: RollcallEvent):
         return (
@@ -1319,8 +1574,9 @@ class DashboardWindow(QMainWindow):
             event.rollcall_type,
             event.status,
             event.number_code or "-",
-            event.result,
-            event.detail,
+            f"{event.signed_count}/{event.total_count}" if event.total_count else "-",
+            event.strategy_status,
+            f"{event.result}：{event.detail}" if event.detail else event.result,
         )
 
     def _refresh_event_tables(self):
@@ -1430,8 +1686,11 @@ class DashboardWindow(QMainWindow):
             group_label,
             record.course_title,
             record.rollcall_time,
+            record.end_time,
             record.rollcall_type,
             status_text,
+            record.attendance,
+            record.number_code,
             record.platform_status,
             record.rollcall_id,
             record.detail,
@@ -1441,9 +1700,9 @@ class DashboardWindow(QMainWindow):
             if column == 0 and record.rollcall_id and record.rollcall_id != "-":
                 item.setData(Qt.ItemDataRole.UserRole, record.rollcall_id)
                 item.setData(int(Qt.ItemDataRole.UserRole) + 1, record.course_title)
-            if column in (0, 2, 3, 4, 5, 6):
+            if column in (0, 2, 3, 4, 5, 6, 7, 8, 9):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if column == 4:
+            if column == 5:
                 foreground, background = COURSE_STATUS_COLORS.get(status_text, COURSE_STATUS_COLORS["未知"])
                 item.setForeground(QColor(foreground))
                 item.setBackground(QColor(background))
@@ -1502,7 +1761,10 @@ class DashboardWindow(QMainWindow):
         unsigned = sum(1 for record in self.course_records if record.signed_status == "未签到")
         unknown = sum(1 for record in self.course_records if record.signed_status == "未知")
         no_rollcalls = sum(1 for record in self.course_records if record.signed_status == "无签到记录")
-        summary = f"共 {len(self.course_records)} 条；已签 {signed}；未签 {unsigned}；未知 {unknown}；无记录 {no_rollcalls}"
+        code_success = sum(record.number_code not in ("", "-") for record in self.course_records)
+        enrichment_failures = sum(record.enrichment_error for record in self.course_records)
+        summary = (f"共 {len(self.course_records)} 条；已签 {signed}；未签 {unsigned}；未知 {unknown}；"
+                   f"无记录 {no_rollcalls}；成功取码 {code_success}；扩展失败 {enrichment_failures}")
         if self.only_unsigned_check.isChecked():
             summary += f"；当前显示 {len(records)} 条未签"
         self.course_summary.setText(summary)
@@ -1561,6 +1823,7 @@ class DashboardWindow(QMainWindow):
         previous = self.courseware_combo.currentText()
         self.courseware_courses = courses
         displays = self._refresh_courseware_course_combo(previous)
+        self._refresh_binding_courses()
 
         self.courseware_summary.setText(f"共 {len(courses)} 门课程；当前显示 {len(displays)} 门")
         self.log(f"课件课程列表读取完成，共 {len(courses)} 门，当前筛选 {len(displays)} 门；接口：{source}")

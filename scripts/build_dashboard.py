@@ -23,6 +23,7 @@ def main():
     run([
         "--noconfirm", "--clean", "--windowed", "--onefile",
         "--name", "XMU-Rollcall-Dashboard", "--specpath", str(root / "build"),
+        "--version-file", str(root / "scripts" / "windows_version_info.txt"),
         "--paths", str(root / "xmu-rollcall-cli"),
         "--collect-submodules", "xmu_rollcall", "--collect-submodules", "xmulogin",
         str(root / "scripts" / "xmu_dashboard_launcher.py"),

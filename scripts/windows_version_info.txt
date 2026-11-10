@@ -1,0 +1,26 @@
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(4, 3, 0, 0),
+    prodvers=(4, 3, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('080404b0', [
+        StringStruct('CompanyName', 'XMU Rollcall Bot'),
+        StringStruct('FileDescription', 'XMU Rollcall Dashboard'),
+        StringStruct('FileVersion', '4.3.0'),
+        StringStruct('InternalName', 'XMU-Rollcall-Dashboard'),
+        StringStruct('OriginalFilename', 'XMU-Rollcall-Dashboard.exe'),
+        StringStruct('ProductName', 'XMU Rollcall Dashboard'),
+        StringStruct('ProductVersion', '4.3.0')
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+  ]
+)

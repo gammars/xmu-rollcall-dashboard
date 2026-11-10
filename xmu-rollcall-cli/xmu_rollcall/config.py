@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from pathlib import Path
 
 
@@ -26,6 +27,25 @@ def get_config_dir() -> Path:
 CONFIG_DIR = get_config_dir()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
+SYSTEM_LOCATION_PRESETS = [
+    {
+        "id": "6a92d6ec-7ef8-5a1c-92f4-1ad8a9e8b001",
+        "name": "学武楼",
+        "latitude": 24.61174403,
+        "longitude": 118.32029224,
+        "accuracy": 35.0,
+        "built_in": True,
+    },
+    {
+        "id": "6a92d6ec-7ef8-5a1c-92f4-1ad8a9e8b002",
+        "name": "西部片区",
+        "latitude": 24.61096380,
+        "longitude": 118.30657512,
+        "accuracy": 35.0,
+        "built_in": True,
+    },
+]
+
 DEFAULT_ROLLCALL_SETTINGS = {
     "number_delay_min": 10,
     "number_delay_max": 30,
@@ -37,11 +57,13 @@ DEFAULT_ROLLCALL_SETTINGS = {
     "wait_before_answer_count_max": 0,
     "attendance_threshold_enabled": True,
     "attendance_threshold_percent": 10,
+    "course_location_bindings": {},
 }
 
 DEFAULT_CONFIG = {
     "accounts": [],
     "current_account_id": None,
+    "location_presets": SYSTEM_LOCATION_PRESETS,
 }
 
 
@@ -79,6 +101,12 @@ def normalize_rollcall_settings(settings: dict | None) -> dict:
         merged["wait_before_answer_mode"] = "none"
     merged["manual_confirm"] = bool(merged.get("manual_confirm", False))
     merged["attendance_threshold_enabled"] = bool(merged.get("attendance_threshold_enabled", True))
+    bindings = merged.get("course_location_bindings")
+    merged["course_location_bindings"] = {
+        str(course_id): dict(binding)
+        for course_id, binding in (bindings.items() if isinstance(bindings, dict) else [])
+        if isinstance(binding, dict)
+    }
     return merged
 
 
@@ -92,7 +120,7 @@ def ensure_config_dir() -> None:
 def load_config() -> dict:
     ensure_config_dir()
     if not CONFIG_FILE.exists():
-        return DEFAULT_CONFIG.copy()
+        return {"accounts": [], "current_account_id": None, "location_presets": normalize_location_presets([])}
 
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as file:
@@ -101,7 +129,7 @@ def load_config() -> dict:
         raise RuntimeError(f"读取配置失败：{CONFIG_FILE}: {exc}") from exc
 
     if not isinstance(config, dict):
-        return DEFAULT_CONFIG.copy()
+        return {"accounts": [], "current_account_id": None, "location_presets": normalize_location_presets([])}
 
     if "accounts" not in config and config.get("username"):
         config = {
@@ -111,7 +139,7 @@ def load_config() -> dict:
                     "name": "",
                     "username": config.get("username", ""),
                     "password": config.get("password", ""),
-                    "rollcall_settings": DEFAULT_ROLLCALL_SETTINGS.copy(),
+                    "rollcall_settings": normalize_rollcall_settings(None),
                 }
             ],
             "current_account_id": 1,
@@ -119,6 +147,8 @@ def load_config() -> dict:
 
     config.setdefault("accounts", [])
     config.setdefault("current_account_id", None)
+    config.setdefault("location_presets", [])
+    config["location_presets"] = normalize_location_presets(config.get("location_presets"))
     for account in config["accounts"]:
         if isinstance(account, dict):
             account["rollcall_settings"] = normalize_rollcall_settings(account.get("rollcall_settings"))
@@ -129,6 +159,57 @@ def save_config(config: dict) -> None:
     ensure_config_dir()
     with open(CONFIG_FILE, "w", encoding="utf-8") as file:
         json.dump(config, file, indent=2, ensure_ascii=False)
+
+
+def normalize_location_presets(presets) -> list[dict]:
+    normalized = []
+    for preset in presets if isinstance(presets, list) else []:
+        if not isinstance(preset, dict):
+            continue
+        try:
+            latitude = float(preset.get("latitude"))
+            longitude = float(preset.get("longitude"))
+            accuracy = float(preset.get("accuracy", 35))
+        except (TypeError, ValueError):
+            continue
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180 and 1 <= accuracy <= 1000):
+            continue
+        normalized.append({
+            "id": str(preset.get("id") or uuid.uuid4()),
+            "name": str(preset.get("name") or "未命名地点").strip() or "未命名地点",
+            "latitude": latitude,
+            "longitude": longitude,
+            "accuracy": accuracy,
+            "built_in": bool(preset.get("built_in", False)),
+        })
+    for preset in SYSTEM_LOCATION_PRESETS:
+        existing_index = next((i for i, item in enumerate(normalized) if item["id"] == preset["id"]), None)
+        if existing_index is None:
+            normalized.append(dict(preset))
+        else:
+            normalized[existing_index] = dict(preset)
+    return normalized
+
+
+def delete_location_preset(config: dict, preset_id: str) -> int:
+    """Delete a preset and every account binding that references it."""
+    config["location_presets"] = [
+        item for item in normalize_location_presets(config.get("location_presets"))
+        if item["id"] != str(preset_id)
+    ]
+    removed = 0
+    for account in config.get("accounts", []):
+        settings = normalize_rollcall_settings(account.get("rollcall_settings"))
+        bindings = settings["course_location_bindings"]
+        stale = [
+            key for key, value in bindings.items()
+            if isinstance(value, dict) and str(value.get("preset_id")) == str(preset_id)
+        ]
+        for key in stale:
+            del bindings[key]
+            removed += 1
+        account["rollcall_settings"] = settings
+    return removed
 
 
 def get_next_account_id(config: dict) -> int:
@@ -145,7 +226,7 @@ def add_account(config: dict, username: str, password: str, name: str) -> int:
         "name": name,
         "username": username,
         "password": password,
-        "rollcall_settings": DEFAULT_ROLLCALL_SETTINGS.copy(),
+        "rollcall_settings": normalize_rollcall_settings(None),
     }
     config.setdefault("accounts", []).append(account)
     if config.get("current_account_id") is None:

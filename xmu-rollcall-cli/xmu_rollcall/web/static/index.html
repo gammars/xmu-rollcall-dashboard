@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>畅课签到控制台</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">XMU · TRONCLASS</p>
+      <h1>签到监听控制台</h1>
+      <p class="subtitle">登录、监听与策略状态，一屏完成。</p>
+    </div>
+    <div class="hero-status">
+      <span id="loginPill" class="pill muted">未登录</span>
+      <span id="monitorPill" class="pill muted">未监听</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="metrics" aria-label="运行状态">
+      <article><span>当前账号</span><strong id="accountMetric">-</strong></article>
+      <article><span>轮询次数</span><strong id="queryMetric">0</strong></article>
+      <article><span>最后检查</span><strong id="checkMetric">-</strong></article>
+      <article><span>自动提交</span><strong id="autoMetric">关闭</strong></article>
+    </section>
+
+    <div id="notice" class="notice hidden" role="status"></div>
+
+    <section class="grid controls-grid">
+      <article class="panel">
+        <div class="panel-heading">
+          <div><p class="step">01</p><h2>登录畅课</h2></div>
+          <button id="restoreBtn" class="text-button">恢复已保存会话</button>
+        </div>
+        <form id="loginForm">
+          <label>学号<input id="username" autocomplete="username" required placeholder="请输入学号"></label>
+          <label>密码<input id="password" type="password" autocomplete="current-password" required placeholder="仅发送给本地服务"></label>
+          <div class="button-row">
+            <button class="primary" type="submit">登录</button>
+            <button id="disconnectBtn" class="secondary" type="button">断开 Web 会话</button>
+          </div>
+        </form>
+        <p class="hint">账号信息沿用桌面版的本地配置目录，网页不会回传或显示密码。</p>
+      </article>
+
+      <article class="panel accent-panel">
+        <div class="panel-heading"><div><p class="step">02</p><h2>启动监听</h2></div></div>
+        <form id="monitorForm">
+          <label>到课比例阈值
+            <div class="threshold"><input id="threshold" type="range" min="1" max="100" value="10"><output id="thresholdValue">10%</output></div>
+          </label>
+          <label class="switch-row">
+            <span><strong>达到阈值后自动提交</strong><small>数字与已绑定地点的雷达签到</small></span>
+            <input id="autoSubmit" type="checkbox" role="switch">
+          </label>
+          <div class="safety"><strong>安全默认</strong> 自动提交每次启动均为关闭；失败请求不自动重试。</div>
+          <div class="button-row">
+            <button class="primary dark" type="submit">保存并启动</button>
+            <button id="stopBtn" class="secondary" type="button">停止监听</button>
+          </div>
+        </form>
+      </article>
+    </section>
+
+    <section class="panel events-panel">
+      <div class="panel-heading">
+        <div><p class="step">03</p><h2>实时签到</h2></div>
+        <span id="eventCount" class="counter">0 条</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>发现时间</th><th>课程</th><th>类型</th><th>到课</th><th>签到码</th><th>策略</th><th>结果</th></tr></thead>
+          <tbody id="eventsBody"><tr class="empty-row"><td colspan="7">启动监听后，新的签到会显示在这里</td></tr></tbody>
+        </table>
+      </div>
+      <div id="eventCards" class="event-cards"></div>
+    </section>
+
+    <section class="grid lower-grid">
+      <article class="panel">
+        <div class="panel-heading"><div><p class="step">地点</p><h2>雷达预设</h2></div></div>
+        <div id="locations" class="location-list"></div>
+        <form id="bindingForm" class="binding-form">
+          <label>课程<select id="courseSelect"><option value="">登录后读取课程</option></select></label>
+          <label>雷达地点<select id="locationSelect"><option value="">请选择地点</option></select></label>
+          <button class="primary" type="submit">保存课程绑定</button>
+        </form>
+        <p id="bindingSummary" class="hint"></p>
+      </article>
+      <article class="panel log-panel">
+        <div class="panel-heading"><div><p class="step">日志</p><h2>最近运行记录</h2></div></div>
+        <ol id="logs" class="logs"></ol>
+      </article>
+    </section>
+  </main>
+
+  <footer>本地控制台 · v<span id="version">4.3.0</span> · 默认地址 127.0.0.1:8765</footer>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

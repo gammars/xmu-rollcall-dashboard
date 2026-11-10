@@ -27,7 +27,6 @@ __pycache__/
 # Build and package artifacts
 /build/
 /dist/
-/tests/
 /*.spec
 *.egg-info/
 *.whl

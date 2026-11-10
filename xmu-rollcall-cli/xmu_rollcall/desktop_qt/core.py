@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from ..utils import base_url, headers, retry_request
-from ..verify import find_number_code
 
 
 ROLLCALLS_URL = f"{base_url}/api/radar/rollcalls"
@@ -41,6 +41,11 @@ class RollcallEvent:
     result: str = "待处理"
     detail: str = ""
     number_code: str = ""
+    course_id: str = ""
+    end_time: str = ""
+    signed_count: int = 0
+    total_count: int = 0
+    strategy_status: str = "待检查"
 
 
 @dataclass
@@ -53,6 +58,11 @@ class CourseRollcallRecord:
     signed_status: str
     platform_status: str
     detail: str = ""
+    end_time: str = "-"
+    attendance: str = "-"
+    number_code: str = "-"
+    enrichment_error: bool = False
+    raw_rollcall_time: str = ""
 
 
 @dataclass
@@ -73,6 +83,35 @@ class RollcallRoster:
     title: str
     status: str
     students: list[StudentRollcallRecord]
+    limited: bool = False
+
+
+@dataclass
+class RollcallSnapshot:
+    rollcall_id: str
+    course_id: str
+    course_title: str
+    rollcall_time: str
+    utc_date: str
+    end_time: str
+    status: str
+    rollcall_type: str
+    number_code: str
+    signed_count: int
+    total_count: int
+    student_rollcalls: list[dict]
+    raw: dict
+
+    @property
+    def ended(self) -> bool:
+        if self.status.lower() in {"finished", "ended", "closed", "expired", "cancelled", "canceled"}:
+            return True
+        parsed = parse_datetime(self.end_time)
+        return bool(parsed and parsed <= datetime.now(timezone.utc))
+
+    @property
+    def attendance_ratio(self) -> float | None:
+        return self.signed_count / self.total_count if self.total_count else None
 
 
 class MonitorWorker(threading.Thread):
@@ -139,6 +178,7 @@ def build_rollcall_event(rollcall: dict) -> RollcallEvent:
         rollcall_type=rollcall_type,
         status=str(rollcall.get("status") or "unknown"),
         raw=rollcall,
+        course_id=str(first_value(rollcall, ("course_id",), "")),
     )
 
 
@@ -262,6 +302,116 @@ def normalize_time(value) -> str:
         return text.replace("T", " ").replace("Z", "").split("+")[0]
 
 
+def parse_datetime(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def rollcall_utc_date(value) -> str:
+    parsed = parse_datetime(value)
+    if not parsed:
+        raise ValueError(f"无效的签到时间：{value!r}")
+    return parsed.date().isoformat()
+
+
+SIGNED_STATUSES = {"on_call", "on_call_fine", "present", "signed", "attended", "fine", "done", "late"}
+ABSENT_STATUSES = {"absent", "missed", "not_signed", "unanswered"}
+
+
+def timetable_rollcalls_from_payload(payload) -> list[dict]:
+    if not isinstance(payload, dict):
+        raise RuntimeError("timetable_rollcalls 未返回有效 JSON 对象")
+    rows = payload.get("rollcalls")
+    if not isinstance(rows, list):
+        raise RuntimeError("timetable_rollcalls 响应缺少 rollcalls 数组")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def fetch_timetable_rollcalls(session, course_id: str, utc_date: str) -> list[dict]:
+    response = session.get(
+        f"{base_url}/api/timetable_rollcalls",
+        params={"course_ids": str(course_id), "rollcall_date": str(utc_date)},
+        headers=headers,
+        timeout=20,
+    )
+    response.raise_for_status()
+    try:
+        return timetable_rollcalls_from_payload(response.json())
+    except ValueError as exc:
+        raise RuntimeError("timetable_rollcalls 未返回 JSON 数据") from exc
+
+
+def snapshot_from_timetable_row(row: dict, fallback_course_id: str = "") -> RollcallSnapshot:
+    students = row.get("student_rollcalls")
+    if not isinstance(students, list):
+        students = []
+    students = [item for item in students if isinstance(item, dict)]
+    signed_count = sum(
+        str(item.get("status") or "").strip().lower() in SIGNED_STATUSES
+        for item in students
+    )
+    rollcall_time = str(first_value(row, ("rollcall_time", "created_at", "start_time"), ""))
+    course = row.get("course") if isinstance(row.get("course"), dict) else {}
+    course_id = str(first_value(course, ("id", "course_id"), fallback_course_id))
+    code = row.get("number_code")
+    return RollcallSnapshot(
+        rollcall_id=str(first_value(row, ("id", "rollcall_id"), "")),
+        course_id=course_id,
+        course_title=str(first_value(course, ("name", "title"), "")),
+        rollcall_time=rollcall_time,
+        utc_date=rollcall_utc_date(rollcall_time),
+        end_time=str(first_value(row, ("end_time", "ended_at", "deadline"), "")),
+        status=str(first_value(row, ("status", "state"), "unknown")),
+        rollcall_type=normalize_rollcall_type(row),
+        number_code="" if code in (None, "") else str(code),
+        signed_count=signed_count,
+        total_count=len(students),
+        student_rollcalls=students,
+        raw=row,
+    )
+
+
+def fetch_rollcall_snapshot(session, rollcall_id: str) -> RollcallSnapshot:
+    detail_response = session.get(f"{base_url}/api/rollcall/{rollcall_id}", headers=headers, timeout=20)
+    detail_response.raise_for_status()
+    try:
+        detail = detail_response.json()
+    except ValueError as exc:
+        raise RuntimeError("签到详情接口未返回 JSON 数据") from exc
+    if not isinstance(detail, dict):
+        raise RuntimeError("签到详情接口未返回有效 JSON 对象")
+    course = detail.get("course") if isinstance(detail.get("course"), dict) else {}
+    course_id = str(first_value(detail, ("course_id",), first_value(course, ("id", "course_id"), "")))
+    rollcall_time = first_value(detail, ("rollcall_time", "created_at", "start_time"), "")
+    if not course_id or not rollcall_time:
+        raise RuntimeError("签到详情缺少 course_id 或 rollcall_time")
+    rows = fetch_timetable_rollcalls(session, course_id, rollcall_utc_date(rollcall_time))
+    match = next((row for row in rows if str(first_value(row, ("id", "rollcall_id"), "")) == str(rollcall_id)), None)
+    if match is None:
+        raise RuntimeError(f"timetable_rollcalls 中未找到签到 ID {rollcall_id}")
+    return snapshot_from_timetable_row(match, course_id)
+
+
+def snapshot_self_status(snapshot: RollcallSnapshot, profile_user_id: str) -> str:
+    for item in snapshot.student_rollcalls:
+        if str(item.get("student_id") or "") != str(profile_user_id):
+            continue
+        status = str(item.get("status") or "").lower()
+        if status in SIGNED_STATUSES:
+            return "已签到"
+        if status in ABSENT_STATUSES:
+            return "未签到"
+        return normalize_student_rollcall_status(status)
+    return "未知"
+
+
 def infer_signed_status(rollcall: dict, student_detail: dict | None, username: str) -> tuple[str, str]:
     platform_status = str(first_value(rollcall, ("status", "rollcall_status", "state"), "unknown"))
     status_text = " ".join(
@@ -341,6 +491,7 @@ def display_nested_value(value, keys: tuple[str, ...] = ("name", "title", "code"
 def normalize_student_rollcall_status(value) -> str:
     raw = str(value or "unknown").strip().lower()
     labels = {
+        "on_call": "已签到",
         "on_call_fine": "已签到",
         "present": "已签到",
         "signed": "已签到",
@@ -404,26 +555,43 @@ def parse_rollcall_roster(rollcall_id: str, payload) -> RollcallRoster:
 def fetch_rollcall_roster(session, rollcall_id: str) -> RollcallRoster:
     if not rollcall_id or rollcall_id == "-":
         raise RuntimeError("该记录没有有效的签到 ID")
-    response = session.get(
-        f"{base_url}/api/rollcall/{rollcall_id}/student_rollcalls",
-        headers=headers,
-        timeout=20,
-    )
-    if response.status_code in (401, 403):
-        raise RuntimeError("登录态已失效或当前账号无权查看签到名单")
-    response.raise_for_status()
     try:
-        payload = response.json()
-    except ValueError as exc:
-        raise RuntimeError("签到名单接口未返回 JSON 数据") from exc
-    return parse_rollcall_roster(rollcall_id, payload)
+        response = session.get(
+            f"{base_url}/api/rollcall/{rollcall_id}/student_rollcalls",
+            headers=headers,
+            timeout=20,
+        )
+        if response.status_code in (401, 403):
+            raise RuntimeError("登录态已失效或当前账号无权查看签到名单")
+        response.raise_for_status()
+        roster = parse_rollcall_roster(rollcall_id, response.json())
+        if roster.students:
+            return roster
+    except Exception:
+        pass
+
+    snapshot = fetch_rollcall_snapshot(session, rollcall_id)
+    students = [StudentRollcallRecord(
+        name=f"学生 #{item.get('student_id', '-')}",
+        user_no="-",
+        klass="-",
+        department="-",
+        rollcall_status=normalize_student_rollcall_status(item.get("status")),
+        rollcall_time="-",
+        distance="-",
+        status_detail="平台未返回姓名",
+    ) for item in snapshot.student_rollcalls]
+    return RollcallRoster(
+        rollcall_id=rollcall_id,
+        title=f"{snapshot.course_title or '签到'}（平台未返回姓名）",
+        status=snapshot.status,
+        students=students,
+        limited=True,
+    )
 
 
 def fetch_number_code(session, rollcall_id: str) -> str:
-    detail = fetch_student_rollcall_detail(session, rollcall_id)
-    if not detail:
-        return ""
-    return find_number_code(detail) or ""
+    return fetch_rollcall_snapshot(session, rollcall_id).number_code
 
 
 def fetch_course_rollcall_records(
@@ -490,21 +658,111 @@ def fetch_course_rollcall_records(
                 continue
             rollcall_id = str(first_value(rollcall, ("rollcall_id", "id", "activity_id"), ""))
             signed_status, platform_status = infer_signed_status(rollcall, None, username)
+            raw_rollcall_time = str(first_value(rollcall, ("rollcall_time", "created_at", "start_time", "time"), ""))
             records.append(CourseRollcallRecord(
                 course_id=course["id"],
                 course_title=course["title"],
                 rollcall_id=rollcall_id or "-",
-                rollcall_time=normalize_time(first_value(rollcall, ("rollcall_time", "created_at", "start_time", "time"), "")),
+                rollcall_time=normalize_time(raw_rollcall_time),
                 rollcall_type=normalize_rollcall_type(rollcall),
                 signed_status=signed_status,
                 platform_status=platform_status,
                 detail="",
+                raw_rollcall_time=raw_rollcall_time,
             ))
 
+    enrich_course_rollcall_records(session, records, student_id)
     source = f"课程接口：{course_endpoint}；筛选：{academic_year or '全部学年'} / {semester or '全部'}"
     if endpoint_hits:
         source += f"；签到接口示例：{endpoint_hits[0]}"
     return records, source
+
+
+def enrich_course_rollcall_records(session, records: list[CourseRollcallRecord], profile_user_id: str, max_workers: int = 6) -> None:
+    """Enrich course history in bounded `(course_id, UTC date)` batches."""
+    groups: dict[tuple[str, str], list[CourseRollcallRecord]] = {}
+    for record in records:
+        if record.rollcall_id == "-":
+            continue
+        raw_time = record.raw_rollcall_time or record.rollcall_time
+        try:
+            key = (record.course_id, rollcall_utc_date(raw_time))
+        except ValueError:
+            record.enrichment_error = True
+            record.detail = "无法解析签到时间，扩展数据未加载"
+            continue
+        groups.setdefault(key, []).append(record)
+
+    if not groups:
+        return
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(groups))) as executor:
+        futures = {
+            executor.submit(fetch_timetable_rollcalls, session, course_id, utc_date): (course_id, utc_date)
+            for course_id, utc_date in groups
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            group = groups[key]
+            try:
+                rows = future.result()
+            except Exception as exc:
+                for record in group:
+                    if not enrich_course_record_from_detail(session, record, profile_user_id):
+                        record.enrichment_error = True
+                        record.detail = f"扩展数据失败：{exc}"
+                continue
+            by_id = {str(first_value(row, ("id", "rollcall_id"), "")): row for row in rows}
+            for record in group:
+                row = by_id.get(str(record.rollcall_id))
+                if row is None:
+                    if not enrich_course_record_from_detail(session, record, profile_user_id):
+                        record.enrichment_error = True
+                        record.detail = "扩展数据中未找到该签到 ID，详情接口也不可用"
+                    continue
+                try:
+                    snapshot = snapshot_from_timetable_row(row, record.course_id)
+                except Exception as exc:
+                    record.enrichment_error = True
+                    record.detail = f"扩展数据解析失败：{exc}"
+                    continue
+                record.end_time = normalize_time(snapshot.end_time)
+                record.attendance = f"{snapshot.signed_count}/{snapshot.total_count}" if snapshot.total_count else "-"
+                record.number_code = snapshot.number_code if snapshot.rollcall_type == "数字签到" and snapshot.number_code else "-"
+                record.platform_status = snapshot.status
+                record.rollcall_type = snapshot.rollcall_type
+                record.signed_status = snapshot_self_status(snapshot, profile_user_id)
+
+
+def enrich_course_record_from_detail(session, record: CourseRollcallRecord, profile_user_id: str) -> bool:
+    """Fallback for non-timetable `another` records; never reads a number code."""
+    payload = fetch_student_rollcall_detail(session, record.rollcall_id)
+    if not isinstance(payload, dict):
+        return False
+    students = unwrap_list(payload, ("student_rollcalls", "students", "data", "items", "list"))
+    students = [item for item in students if isinstance(item, dict)]
+    if not students:
+        return False
+    signed = sum(
+        str(first_value(item, ("status", "rollcall_status", "state"), "")).lower() in SIGNED_STATUSES
+        for item in students
+    )
+    record.attendance = f"{signed}/{len(students)}"
+    record.end_time = normalize_time(first_value(payload, ("end_time", "ended_at", "deadline"), ""))
+    record.platform_status = str(first_value(payload, ("status", "state"), record.platform_status))
+    record.rollcall_type = normalize_rollcall_type(payload)
+    record.number_code = "-"
+    own = next((item for item in students if str(item.get("student_id") or "") == str(profile_user_id)), None)
+    if own:
+        own_status = str(first_value(own, ("status", "rollcall_status", "state"), "")).lower()
+        if own_status in SIGNED_STATUSES:
+            record.signed_status = "已签到"
+        elif own_status in ABSENT_STATUSES:
+            record.signed_status = "未签到"
+        else:
+            record.signed_status = normalize_student_rollcall_status(own_status)
+    record.detail = "到课人数来自签到详情（新接口未返回该记录）"
+    record.enrichment_error = False
+    return True
 
 
 def format_duration(seconds: int) -> str:
