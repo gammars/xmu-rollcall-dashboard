@@ -156,6 +156,22 @@ $env:XMU_ROLLCALL_WEB_PASSWORD = "请换成足够长的密码"
 
 再使用电脑的局域网 IPv4 地址访问 `http://电脑IP:8765`。浏览器会弹出 HTTP Basic 登录框，用户名可任意填写，密码使用上面设置的值。不要直接把该 HTTP 服务暴露到公网；正式服务器部署应由 HTTPS 反向代理终止 TLS，并继续设置访问密码。服务只支持单进程运行，不要给 Uvicorn 配置多个 worker。
 
+#### Linux / OpenCloudOS
+
+`.ps1` 是 Windows PowerShell 脚本，Linux 服务器应使用 `start_web.sh`。首次部署：
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r xmu-rollcall-cli/requirements-web.txt
+
+export XMU_ROLLCALL_WEB_HOST=0.0.0.0
+export XMU_ROLLCALL_WEB_PORT=8765
+export XMU_ROLLCALL_WEB_PASSWORD='请换成足够长的密码'
+bash scripts/start_web.sh
+```
+
+Web 专用依赖不包含 PySide6。前台启动只适合临时验证；SSH 断开后仍需稳定运行时，应交由 systemd 管理，并通过 Nginx/Caddy 配置 HTTPS，避免把 8765 端口直接暴露到公网。
+
 ### 测试与编译检查
 
 ```powershell
